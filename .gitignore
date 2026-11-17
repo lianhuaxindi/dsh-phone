@@ -1,0 +1,56 @@
+# --- OS / editor ---
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# --- Phase0 沙箱修复痕迹 ---
+.acl-recovery/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- Bridge runtime state (never commit) ---
+bridge/state/
+bridge/certs/
+bridge/logs/
+*.pem
+*.key
+*.log
+*.jsonl
+!docs/**/*.jsonl
+
+# --- ASR models (large, downloaded) ---
+models/*
+!models/.gitkeep
+
+# --- Android / Gradle ---
+app/android/.gradle/
+app/android/local.properties
+app/android/build/
+app/android/*/build/
+app/android/captures/
+*.apk
+*.aab
+app/android/keystore.properties
+*.jks
+*.keystore
+
+# --- Node / web tooling ---
+node_modules/
+app/web/dist/
+
+# --- Secrets ---
+.env
+.env.*
+secrets/
