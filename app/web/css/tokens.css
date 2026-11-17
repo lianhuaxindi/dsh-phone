@@ -1,0 +1,175 @@
+/* ==========================================================================
+   Design tokens — light/dark follow the system by default (PRD §12).
+   The app may override with <html data-theme="light|dark"> for the setting.
+   Touch targets are at least 48dp (--touch).
+   ========================================================================== */
+
+:root {
+  color-scheme: light dark;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono",
+    "Courier New", monospace;
+
+  --touch: 48px;
+  --radius-s: 8px;
+  --radius-m: 14px;
+  --radius-l: 20px;
+  --radius-full: 999px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  --z-sticky: 10;
+  --z-overlay: 40;
+  --z-sheet: 50;
+  --z-toast: 60;
+
+  --transition-fast: 120ms ease;
+}
+
+/* Light theme */
+:root,
+:root[data-theme="light"] {
+  --bg: #f6f7f9;
+  --bg-elevated: #ffffff;
+  --bg-sunken: #eceef2;
+  --bg-hover: #e6e9ef;
+  --bg-active: #dde2ea;
+  --bg-inverse: #12202f;
+  --surface-sheet: #ffffff;
+
+  --text: #16212c;
+  --text-muted: #5b6b7c;
+  --text-faint: #8b98a7;
+  --text-on-accent: #ffffff;
+  --text-on-danger: #ffffff;
+
+  --border: #dbe1e8;
+  --border-strong: #c3ccd6;
+
+  --accent: #1565c0;
+  --accent-hover: #0f57a8;
+  --accent-soft: #e3effc;
+  --danger: #b3261e;
+  --danger-soft: #fbe9e7;
+  --warning: #a15c00;
+  --warning-soft: #fff2dd;
+  --success: #1b6b3a;
+  --success-soft: #e4f5ea;
+
+  --code-bg: #f1f3f6;
+  --code-border: #dfe4ea;
+  --user-bubble: #e3effc;
+  --assistant-bubble: #ffffff;
+  --system-bubble: #eef0f3;
+
+  --shadow-s: 0 1px 2px rgba(16, 30, 45, 0.08);
+  --shadow-m: 0 6px 24px rgba(16, 30, 45, 0.14);
+  --shadow-l: 0 24px 64px rgba(16, 30, 45, 0.28);
+
+  --overlay-scrim: rgba(9, 16, 24, 0.45);
+  --focus-ring: 0 0 0 3px rgba(21, 101, 192, 0.45);
+}
+
+/* Dark theme */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0b0f14;
+    --bg-elevated: #131a22;
+    --bg-sunken: #0e141b;
+    --bg-hover: #1b242e;
+    --bg-active: #222d3a;
+    --bg-inverse: #e8eef5;
+    --surface-sheet: #151d26;
+
+    --text: #e8eef5;
+    --text-muted: #9dabb9;
+    --text-faint: #6f7e8d;
+    --text-on-accent: #06121e;
+    --text-on-danger: #ffffff;
+
+    --border: #26313d;
+    --border-strong: #364354;
+
+    --accent: #6fb3ff;
+    --accent-hover: #8ec6ff;
+    --accent-soft: #16283c;
+    --danger: #ff8a80;
+    --danger-soft: #33191a;
+    --warning: #ffc466;
+    --warning-soft: #2f2410;
+    --success: #74d99f;
+    --success-soft: #10291b;
+
+    --code-bg: #0d141c;
+    --code-border: #24303d;
+    --user-bubble: #16283c;
+    --assistant-bubble: #131a22;
+    --system-bubble: #1a222c;
+
+    --shadow-s: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --shadow-m: 0 8px 28px rgba(0, 0, 0, 0.55);
+    --shadow-l: 0 24px 72px rgba(0, 0, 0, 0.7);
+
+    --overlay-scrim: rgba(0, 0, 0, 0.62);
+    --focus-ring: 0 0 0 3px rgba(111, 179, 255, 0.5);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0b0f14;
+  --bg-elevated: #131a22;
+  --bg-sunken: #0e141b;
+  --bg-hover: #1b242e;
+  --bg-active: #222d3a;
+  --bg-inverse: #e8eef5;
+  --surface-sheet: #151d26;
+
+  --text: #e8eef5;
+  --text-muted: #9dabb9;
+  --text-faint: #6f7e8d;
+  --text-on-accent: #06121e;
+  --text-on-danger: #ffffff;
+
+  --border: #26313d;
+  --border-strong: #364354;
+
+  --accent: #6fb3ff;
+  --accent-hover: #8ec6ff;
+  --accent-soft: #16283c;
+  --danger: #ff8a80;
+  --danger-soft: #33191a;
+  --warning: #ffc466;
+  --warning-soft: #2f2410;
+  --success: #74d99f;
+  --success-soft: #10291b;
+
+  --code-bg: #0d141c;
+  --code-border: #24303d;
+  --user-bubble: #16283c;
+  --assistant-bubble: #131a22;
+  --system-bubble: #1a222c;
+
+  --shadow-s: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-m: 0 8px 28px rgba(0, 0, 0, 0.55);
+  --shadow-l: 0 24px 72px rgba(0, 0, 0, 0.7);
+
+  --overlay-scrim: rgba(0, 0, 0, 0.62);
+  --focus-ring: 0 0 0 3px rgba(111, 179, 255, 0.5);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

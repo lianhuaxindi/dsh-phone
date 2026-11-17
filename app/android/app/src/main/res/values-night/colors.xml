@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="window_background">#FF0F1419</color>
+    <color name="status_bar">#FF0F1419</color>
+    <color name="navigation_bar">#FF0F1419</color>
+</resources>

@@ -1,0 +1,16 @@
+<resources>
+    <string name="app_name">DSH Phone</string>
+
+    <string name="notification_channel_mic">麦克风会话</string>
+    <string name="notification_channel_mic_desc">按住说话期间显示，表示手机壳正在占用麦克风。</string>
+    <string name="notification_channel_alerts">提醒</string>
+    <string name="notification_channel_alerts_desc">配对与审批提醒。</string>
+
+    <string name="notification_mic_title">DSH 语音</string>
+    <string name="notification_mic_text_recording">正在聆听… 松手发送</string>
+    <string name="notification_mic_text_ready">按住说话就绪</string>
+
+    <string name="fallback_title">未打包 Web 资源</string>
+    <string name="fallback_body">构建前请先运行 scripts/sync_web.ps1（或 scripts/sync_web.sh），把 app/web 同步进 APK。</string>
+    <string name="fallback_hint">预期路径：app/android/app/src/main/assets/web/</string>
+</resources>

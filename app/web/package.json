@@ -1,0 +1,9 @@
+{
+  "name": "dsh-phone-web",
+  "private": true,
+  "type": "module",
+  "description": "DSH Phone WebView UI — plain HTML/CSS/ES modules, zero dependencies, zero build step.",
+  "scripts": {
+    "test": "node --test tests"
+  }
+}

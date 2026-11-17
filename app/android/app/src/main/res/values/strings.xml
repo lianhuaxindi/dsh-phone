@@ -1,0 +1,16 @@
+<resources>
+    <string name="app_name">DSH Phone</string>
+
+    <string name="notification_channel_mic">Microphone session</string>
+    <string name="notification_channel_mic_desc">Shown while the phone shell holds the microphone for push-to-talk.</string>
+    <string name="notification_channel_alerts">Alerts</string>
+    <string name="notification_channel_alerts_desc">Pairing and approval reminders.</string>
+
+    <string name="notification_mic_title">DSH voice</string>
+    <string name="notification_mic_text_recording">Listening… release the button to send</string>
+    <string name="notification_mic_text_ready">Ready for push-to-talk</string>
+
+    <string name="fallback_title">Web assets are not bundled</string>
+    <string name="fallback_body">Run scripts/sync_web.ps1 (or scripts/sync_web.sh) before building so that app/web is packaged inside the APK.</string>
+    <string name="fallback_hint">Expected at app/android/app/src/main/assets/web/</string>
+</resources>

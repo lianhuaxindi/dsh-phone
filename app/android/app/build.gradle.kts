@@ -1,0 +1,67 @@
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+}
+
+// CI 注入版本（ci/version.json）：gradle ... -Pdsphone.versionName=0.2.0 -Pdsphone.versionCode=7
+val dsphoneVersionName: String = (findProperty("dsphone.versionName") as String?) ?: "1.0.0"
+val dsphoneVersionCode: Int = ((findProperty("dsphone.versionCode") as String?) ?: "1").toIntOrNull() ?: 1
+
+android {
+    namespace = "com.dsh.phone"
+    compileSdk = 35
+
+    defaultConfig {
+        applicationId = "com.dsh.phone"
+        minSdk = 29
+        targetSdk = 35
+        versionCode = if (dsphoneVersionCode >= 1) dsphoneVersionCode else 1
+        versionName = dsphoneVersionName
+    }
+
+    buildFeatures {
+        buildConfig = true
+    }
+
+    buildTypes {
+        debug {
+            // 调试包不混淆，方便 CI 产物直接排查问题（D-004：debug APK 侧载）。
+            isMinifyEnabled = false
+            isShrinkResources = false
+        }
+        release {
+            // V1 不发布 release 到商店；先保持不混淆，规则文件已备好。
+            isMinifyEnabled = false
+            isShrinkResources = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    testOptions {
+        unitTests.isIncludeAndroidResources = false
+    }
+
+    lint {
+        abortOnError = false
+        checkReleaseBuilds = false
+    }
+}
+
+dependencies {
+    // 唯一运行时依赖：WSS 客户端（java.net.http 在 Android 上不可用，只能 OkHttp）。
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // JVM 单元测试（帧头、鉴权、退避、协议 JSON、脱敏等纯逻辑）。
+    testImplementation("junit:junit:4.13.2")
+}
