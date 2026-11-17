@@ -1,0 +1,387 @@
+# DSH Phone CI
+#
+# 任务矩阵（docs/ARCHITECTURE.md §6）：
+#   bridge-tests : ubuntu + windows，Python 3.11，pytest bridge/tests
+#   web-tests    : node 20，node --test app/web/tests
+#   android-build: ubuntu + JDK17 + Gradle，scripts/sync_web.sh -> assembleDebug -> 上传 app-debug.apk
+#   secrets-scan : 扫描 diff（或全仓库）中的密钥/证书/模型/构建产物
+#
+# 本机无 JDK/Android SDK（docs/DECISIONS.md D-006）-> APK 只在本 workflow 构建；
+# 手动出包：Actions 页面点 "Run workflow"（workflow_dispatch），产物在 run 的 Artifacts 里。
+name: DSH Phone CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "20"
+  GRADLE_FALLBACK_VERSION: "8.9"
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
+jobs:
+  # ================================================================ Bridge 测试
+  bridge-tests:
+    name: bridge-tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Bridge module inputs
+        run: |
+          missing=0
+          if [ ! -d bridge ]; then
+            echo "::error::缺少 bridge/ 目录（bridge-core 模块负责）"
+            missing=1
+          fi
+          if [ ! -f bridge/requirements.txt ]; then
+            echo "::error::缺少 bridge/requirements.txt（bridge-core 需提供固定版本运行依赖）"
+            missing=1
+          fi
+          if [ ! -d bridge/tests ]; then
+            echo "::error::缺少 bridge/tests/（bridge-core 需提供 pytest 测试）"
+            missing=1
+          fi
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Bridge 模块尚未就绪，请 bridge-core 补齐以上文件后重新运行 CI。"
+            exit 1
+          fi
+          echo "Bridge 输入检查通过。"
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            bridge/requirements.txt
+            bridge/requirements-dev.txt
+
+      - name: Install Python dependencies (with pip cache)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r bridge/requirements.txt
+          if [ -f bridge/requirements-dev.txt ]; then
+            python -m pip install -r bridge/requirements-dev.txt
+          else
+            echo "::warning::bridge/requirements-dev.txt 不存在（pytest / pytest-asyncio 等测试依赖缺失），请 bridge-core 补；本步先回退安装 pytest pytest-asyncio。"
+            python -m pip install pytest pytest-asyncio
+          fi
+
+      - name: Run bridge tests (pytest)
+        run: python -m pytest bridge/tests -q -p no:cacheprovider --junitxml=bridge-test-results.xml
+
+      - name: Upload pytest report (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-report-${{ matrix.os }}
+          path: bridge-test-results.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ================================================================ Web UI 测试
+  web-tests:
+    name: web-tests (node ${{ env.NODE_VERSION }})
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Web module inputs
+        run: |
+          missing=0
+          if [ ! -d app/web ]; then
+            echo "::error::缺少 app/web/（web-ui 模块负责）"
+            missing=1
+          fi
+          if [ ! -f app/web/index.html ]; then
+            echo "::error::缺少 app/web/index.html（web-ui 模块入口）"
+            missing=1
+          fi
+          if [ ! -d app/web/tests ]; then
+            echo "::error::缺少 app/web/tests/（web-ui 需提供 node --test 单测）；注意：node --test 是 Node 18+ 内置，不需要 npm 依赖。"
+            missing=1
+          fi
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Web 模块尚未就绪，请 web-ui 补齐以上文件后重新运行 CI。"
+            exit 1
+          fi
+          echo "Web 输入检查通过。"
+
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Show Node version
+        run: node --version
+
+      - name: Run web tests (node --test)
+        run: node --test app/web/tests
+
+  # ================================================================ Android APK
+  android-build:
+    name: android-build (debug APK)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Android / Web module inputs
+        run: |
+          missing=0
+          if [ ! -d app/android ]; then
+            echo "::error::缺少 app/android/（android 壳模块负责）"
+            missing=1
+          fi
+          if [ ! -f app/android/settings.gradle.kts ] && [ ! -f app/android/settings.gradle ]; then
+            echo "::error::缺少 app/android/settings.gradle.kts（android 模块）"
+            missing=1
+          fi
+          if [ ! -f app/android/build.gradle.kts ] && [ ! -f app/android/build.gradle ]; then
+            echo "::error::缺少 app/android/build.gradle.kts（android 模块根构建脚本）"
+            missing=1
+          fi
+          if [ ! -f app/android/app/build.gradle.kts ] && [ ! -f app/android/app/build.gradle ]; then
+            echo "::error::缺少 app/android/app/build.gradle.kts（android 模块 app 构建脚本）"
+            missing=1
+          fi
+          if [ ! -d app/android/app/src/main ]; then
+            echo "::error::缺少 app/android/app/src/main/（AndroidManifest/资源目录）"
+            missing=1
+          fi
+          if [ ! -f app/web/index.html ]; then
+            echo "::error::缺少 app/web/index.html（web-ui 模块；APK 的 WebView 资源由 scripts/sync_web.sh 同步）"
+            missing=1
+          fi
+          for tool in verify_protocol.py check_contract.py check_kotlin_static.py check_gradle_config.py; do
+            if [ ! -f "app/android/tools/$tool" ]; then
+              echo "::error::缺少 app/android/tools/$tool（android-shell 提供的纯 stdlib 离线自检工具）"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Android 构建输入不完整，请对应模块补齐后重新运行 CI。"
+            exit 1
+          fi
+          echo "Android 输入检查通过。"
+
+      - name: Sync web assets into Android app (scripts/sync_web.sh)
+        run: bash scripts/sync_web.sh
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install required Android SDK components
+        run: |
+          sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_SDK_ROOT=$sdk_root"
+          sdkmanager="$sdk_root/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$sdkmanager" ]; then
+            sdkmanager="$(command -v sdkmanager || true)"
+          fi
+          if [ -z "$sdkmanager" ] || [ ! -x "$sdkmanager" ]; then
+            echo "::error::未找到 sdkmanager；runner 上的 Android SDK 不可用。"
+            ls "$sdk_root" 2>/dev/null || true
+            exit 1
+          fi
+          yes | "$sdkmanager" --sdk_root="$sdk_root" --licenses >/dev/null 2>&1 || true
+          "$sdkmanager" --sdk_root="$sdk_root" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+          echo "--- platforms ---"
+          ls "$sdk_root/platforms" 2>/dev/null || true
+          echo "--- build-tools ---"
+          ls "$sdk_root/build-tools" 2>/dev/null || true
+
+      - name: Show Android SDK environment
+        run: |
+          echo "ANDROID_HOME=${ANDROID_HOME:-<unset>}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-<unset>}"
+          if [ -n "${ANDROID_HOME:-}" ] && [ -d "$ANDROID_HOME" ]; then
+            echo "--- installed platforms ---"
+            ls "$ANDROID_HOME/platforms" 2>/dev/null || true
+            echo "--- installed build-tools ---"
+            ls "$ANDROID_HOME/build-tools" 2>/dev/null || true
+          fi
+
+      - name: Run Android offline self-checks (pure stdlib, no build)
+        run: |
+          set -e
+          echo "=== verify_protocol.py（协议/加密向量自检，纯逻辑，不做构建） ==="
+          python3 app/android/tools/verify_protocol.py
+          echo "=== check_contract.py（JsBridge Web/Native 契约自检） ==="
+          python3 app/android/tools/check_contract.py
+          echo "=== check_kotlin_static.py（Kotlin 静态检查） ==="
+          python3 app/android/tools/check_kotlin_static.py
+          echo "=== check_gradle_config.py（Gradle 配置自检） ==="
+          python3 app/android/tools/check_gradle_config.py
+          echo "Android 离线静态自检全部通过（上述 4 个脚本任意一个非 0 都会让 job 失败）。"
+
+      - name: Detect Gradle version (wrapper properties or fallback)
+        id: gradle-version
+        run: |
+          version="$GRADLE_FALLBACK_VERSION"
+          props="app/android/gradle/wrapper/gradle-wrapper.properties"
+          if [ -f "$props" ]; then
+            detected=$(sed -n 's/.*gradle-\([0-9][0-9.]*\)-\(bin\|all\)\.zip.*/\1/p' "$props" | head -n 1)
+            if [ -n "$detected" ]; then
+              version="$detected"
+            fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "使用 Gradle $version（来源：wrapper 属性 / 回退 $GRADLE_FALLBACK_VERSION）"
+
+      - name: Set up Gradle (with gradle cache)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ steps.gradle-version.outputs.version }}
+
+      - name: Bootstrap gradle wrapper if jar is missing
+        working-directory: app/android
+        run: |
+          if [ -f gradlew ] && [ -f gradle/wrapper/gradle-wrapper.jar ]; then
+            echo "gradle wrapper 已存在（gradlew + gradle-wrapper.jar），跳过生成。"
+          else
+            echo "gradle-wrapper.jar 缺失，执行 gradle wrapper --gradle-version ${{ steps.gradle-version.outputs.version }} 生成（不提交该二进制）。"
+            gradle wrapper --gradle-version "${{ steps.gradle-version.outputs.version }}" --distribution-type bin --no-daemon
+          fi
+          chmod +x gradlew
+          ./gradlew --version
+
+      - name: Read version from ci/version.json
+        id: version
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+
+          data = json.loads(pathlib.Path('ci/version.json').read_text(encoding='utf-8'))
+          name = data['versionName']
+          code = data['versionCode']
+          if not isinstance(name, str) or not re.fullmatch(r'\d+\.\d+\.\d+', name):
+              raise SystemExit(f'ci/version.json: versionName 非法: {name!r}')
+          if not isinstance(code, int) or isinstance(code, bool) or code < 1:
+              raise SystemExit(f'ci/version.json: versionCode 必须是 >=1 的整数: {code!r}')
+          major, minor, patch = (int(part) for part in name.split('.'))
+          minimum = major * 10000 + minor * 100 + patch
+          if code < minimum:
+              raise SystemExit(f'ci/version.json: versionCode {code} 小于公式值 {minimum}，请用 ci/bump_version.ps1 重新生成')
+          print(f'读取版本: versionName={name} versionCode={code}（公式值 {minimum}）')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as fh:
+              fh.write(f'versionName={name}\n')
+              fh.write(f'versionCode={code}\n')
+          PY
+
+      - name: Assemble debug APK
+        working-directory: app/android
+        env:
+          DSPHONE_VERSION_NAME: ${{ steps.version.outputs.versionName }}
+          DSPHONE_VERSION_CODE: ${{ steps.version.outputs.versionCode }}
+        run: |
+          ./gradlew assembleDebug --no-daemon --console=plain --stacktrace \
+            -Pdsphone.versionName="$DSPHONE_VERSION_NAME" \
+            -Pdsphone.versionCode="$DSPHONE_VERSION_CODE"
+
+      - name: Run Android unit tests (JUnit4, incl. PROTOCOL §6.3 vectors)
+        working-directory: app/android
+        run: |
+          ./gradlew testDebugUnitTest --no-daemon --console=plain --stacktrace
+
+      - name: Locate and verify APK
+        id: apk
+        run: |
+          apk="app/android/app/build/outputs/apk/debug/app-debug.apk"
+          if [ ! -f "$apk" ]; then
+            echo "::error::未找到 APK: $apk"
+            find app/android -name '*.apk' -print 2>/dev/null || true
+            exit 1
+          fi
+          ls -lh "$apk"
+          echo "apk_path=$apk" >> "$GITHUB_OUTPUT"
+          echo "构建成功: $apk（versionName=${{ steps.version.outputs.versionName }} versionCode=${{ steps.version.outputs.versionCode }}）"
+
+      - name: Show build diagnostics on failure
+        if: failure()
+        run: |
+          echo "--- Android SDK ---"
+          echo "ANDROID_HOME=${ANDROID_HOME:-<unset>}"
+          ls "${ANDROID_HOME:-/nonexistent}/platforms" 2>/dev/null || true
+          echo "--- build outputs ---"
+          ls -R app/android/app/build/outputs 2>/dev/null | head -n 80 || true
+          find app/android -name '*.apk' -print 2>/dev/null || true
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-${{ steps.version.outputs.versionName }}-${{ steps.version.outputs.versionCode }}
+          path: ${{ steps.apk.outputs.apk_path }}
+          if-no-files-found: error
+          retention-days: 14
+
+  # ================================================================ 密钥/产物扫描
+  secrets-scan:
+    name: secrets-scan (diff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve diff range
+        id: range
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          base=""
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base="$PR_BASE_SHA"
+          elif [ "$EVENT_NAME" = "push" ]; then
+            case "$PUSH_BEFORE" in
+              "" | 0000000000000000000000000000000000000000) base="" ;;
+              *) base="$PUSH_BEFORE" ;;
+            esac
+          fi
+          if [ -n "$base" ] && git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "mode=range" >> "$GITHUB_OUTPUT"
+            echo "range=$base..$HEAD_SHA" >> "$GITHUB_OUTPUT"
+            echo "扫描范围: $base..$HEAD_SHA"
+          else
+            echo "mode=all" >> "$GITHUB_OUTPUT"
+            echo "无法确定 diff 基线，退化为全仓库扫描（--all）。"
+          fi
+
+      - name: Scan for secrets / certificates / models / build artifacts
+        run: |
+          if [ "${{ steps.range.outputs.mode }}" = "range" ]; then
+            python3 ci/secrets_scan.py --range "${{ steps.range.outputs.range }}"
+          else
+            python3 ci/secrets_scan.py --all
+          fi

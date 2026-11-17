@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "versionName": "1.0.0",
+  "versionCode": 10000,
+  "protocolVersion": "1",
+  "minSdk": 29,
+  "targetSdk": 35,
+  "versionCodeRule": "versionCode = major*10000 + minor*100 + patch（1.0.0 = 10000），且必须严格递增（取 max(公式值, 旧值+1)）"
+}
