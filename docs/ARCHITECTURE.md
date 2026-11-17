@@ -86,7 +86,7 @@ bridge/
 | 提问 handler 在 daemon 线程执行，`threading.Event` 是取消信号 | `question.request` → 用户答/超时 → `UserQuestionAnswer` 或裸 `{"cancelled": true}`；到期发 `question.expired` |
 | **无 cancel/interrupt/stop**，唯一手段 `close()` 杀进程 | `chat.cancel` 回 `turn.error{code:3003,"message":"cancel unsupported (SDK 0.2.2rc2)"}`；不得谎报取消（D-019） |
 | **无 list_sessions / read_history** | `session.list`/`session.history` 完全由 Bridge 的 `history.sqlite3` 提供 |
-| CLI 发现**从不查 PATH**：`dsh_bin` 空 → wheel 内置 runtime exe（147MB）；否则用给定路径；必须显式 `dsh_home`/`DSH_HOME`，否则 `ValueError: …never uses ~/.dsh implicitly` | 配置 `[dsh].runtimeExe`（空=自动探测 wheel 内置）+ `[dsh].home`（默认 `state/dsh_home`，绝对化）；**禁止**回落到用户桌面 `~/.dsh`（D-002） |
+| CLI 发现**从不查 PATH**：`dsh_bin` 空 → wheel 内置 runtime exe（147MB）；否则用给定路径；必须显式 `dsh_home`/`DSH_HOME`，否则 `ValueError: …never uses ~/.dsh implicitly` | 配置 `[dsh].runtimeExe` + `[dsh].home`（默认 `state/dsh_home`，绝对化）；**禁止**回落到用户桌面 `~/.dsh`（D-002）。空值时的解析顺序（D-022）：显式配置/env → 本机已装 DSH（PATH `dsh.cmd`/`dsh.exe`、常见安装目录）→ wheel 内置 exe；每步命中路径与原因必须进日志 |
 | `provider`/`model` 经 initialize 传参，无运行时改模型 API | 模型变更需新会话；配置透传 |
 
 - 依赖：SDK 与 runtime **不进** `bridge/requirements.txt`（147MB+ 且 PyPI 为 `--pre`），单列 `bridge/requirements-sdk.txt`；CI 不装，`[dsh].enabled=false` 走 fake。
@@ -146,7 +146,7 @@ dir = "state/logs"
 | 层 | 位置 | 职责 | 不做什么 |
 |---|---|---|---|
 | UI | `app/web/` | 会话/聊天/设置/诊断、状态机、i18n、审批与提问 Sheet、录音浮层 | 不做原始录音、不碰 TLS/Keystore |
-| 桥 | `app/android/.../JsBridge.kt` | WebView ⇄ Native 的 `postMessage` 通道（JSON） | 不放业务规则 |
+| 桥 | `app/android/.../bridge/DshBridge.kt` | WebView ⇄ Native 的 `postMessage` 通道（JSON，单一 `@JavascriptInterface post()` 按 `op` 分发） | 不放业务规则 |
 | 网络 | `.../net/` | WSS 客户端、TLS 指纹校验、重连退避、协议编解码（Kotlin） | 不做 UI |
 | 音频 | `.../audio/` | AudioRecord 16k/16bit/mono 20ms、PTT、前台服务 | 不做 ASR |
 | 蓝牙 | `.../audio/BtRouter.kt` | `setCommunicationDevice`(31+)/`startBluetoothSco`(29-30)、8s 超时回退 | 不决定 UI 文案 |
@@ -161,6 +161,7 @@ Web → Native（`window.DshNative.post(msg)`）：
 | `op` | 参数 | 返回事件 |
 |---|---|---|
 | `connect` | `{host,port,fp,deviceId}` | `net.state` |
+| `disconnect` | `{ }` | `net.state`（断开且**停止自动重连**；best-effort，用于切换配对/退出登录。非协议冻结面，M2 实现引入） |
 | `pair` | `{code,deviceName}` | `pair.result` |
 | `auth` | `{}` | `auth.result` |
 | `send` | `{json}` 协议消息 | `proto.message` |
@@ -173,7 +174,7 @@ Web → Native（`window.DshNative.post(msg)`）：
 | `notify` | `{title,text}` | —（审批后台提醒，P1） |
 | `exportLogs` | `{}` | `logs.exported`（脱敏） |
 | `reconnect` | `{}` | `net.state`（诊断页「重连 Bridge」；断开并重建连接，**不**重启 Bridge 进程，见 D-013） |
-| `scanPairing` | `{}` | `pair.scanned`（V1 固定返回 `{supported:false,reason:"m3"}`，见 D-011） |
+| `scanPairing` | `{ }` | `scanPairing.result`（V1 固定返回 `{supported:false,reason:"m3"}`，见 D-011；Web 另兼容旧别名 scan.result，M3 可清理） |
 
 Native → Web（`window.DshBridge.onEvent(json)`）：`net.state` / `proto.message`（协议原样透传）/ `audio.state` / `audio.route` / `audio.level`（波形）/ `error`。
 

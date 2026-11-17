@@ -1,0 +1,155 @@
+# DSH Phone 交付说明（Handover）
+
+> 面向：接手这个仓库的人 / 想在本机把它跑起来的用户。
+> 需求见 [PRD.md](PRD.md)，协议见 [PROTOCOL.md](PROTOCOL.md)，架构见 [ARCHITECTURE.md](ARCHITECTURE.md)，
+> 决策记录见 [DECISIONS.md](DECISIONS.md)，测试计划见 [TESTPLAN.md](TESTPLAN.md)，安全见 [SECURITY.md](SECURITY.md)。
+
+## 1. 当前状态（一句话版）
+
+**电脑端 Bridge 已完整可跑**（WSS + 配对认证 + 协议 + 真 ASR + DSH SDK 接线，114 个测试绿）；
+**手机端代码完整**（Kotlin 壳 + WebView UI，静态自检全绿），但**还没有在真机上构建和跑过**；
+**CI 流水线已写好**，但**还没有在 GitHub 上跑过第一次**。
+
+| 里程碑 | 内容 | 状态 | 证据 |
+|---|---|---|---|
+| M0 Phase0 | 仓库骨架、协议冻结（`PROTOCOL.md` v1）、SDK spike | ✅ 完成 | `docs/spike/SDK-SPIKE.md`、D-001…D-025 |
+| M1 Bridge | WSS + 配对 + 认证 + 协议 + 音频帧 + 假/真 ASR + 假/真 DSH | ✅ 完成 | `pytest bridge\tests` → 114 passed；`python -m bridge --self-test` → 5 PASS |
+| M2 App+UI | Kotlin 壳、WebView UI、JsBridge 契约、mock 演示 | ✅ 代码完成、单测/静态验收 | web 122 tests 绿；`app/android/tools/*.py` 4 个脚本全 OK |
+| M3 录音+蓝牙 | AudioRecord / PTT / SCO/HFP / 前台服务 | ⏳ 代码完成，**待真机验收** | `app/android/README.md` 的 M3 runbook（约 30 条可勾选场景） |
+| M4 审批/诊断/CI | 审批/提问弹窗、诊断页、重连、GitHub Actions 出 APK | ✅ 代码与配置完成，**CI 待首次运行** | `.github/workflows/ci.yml`、`ci/` |
+
+## 2. 电脑端：马上能跑
+
+### 2.1 前置
+
+| 项 | 本机取值 | 说明 |
+|---|---|---|
+| Python | `D:\anaconda3\envs\scisim-agent\python.exe`（3.11.17） | `bridge/requirements.txt` 里的依赖已装齐 |
+| ASR 模型 | `models/`（~189MB 流式 + ~228MB SenseVoice） | 已下载并 sha256 校验；`models/*` 不入库 |
+| sherpa-onnx | 手动解包到 `models/.pipdeps`（gitignored） | 沙箱里 pip 装不进环境，用 `PYTHONPATH` 注入；正常机器直接 `pip install sherpa-onnx==2.0.1` |
+| DSH runtime | 自动探测到 `D:\others\DSH\resources\runtime\cli\bin\dsh.cmd` | 走 D-022 解析链；SDK wheel 内置 runtime 在本机不可用 |
+
+### 2.2 三步启动 Bridge
+
+```powershell
+$py = 'D:\anaconda3\envs\scisim-agent\python.exe'
+
+# 0) 自检（2.6s；不烧 token、不需要模型）
+& $py -m bridge --self-test
+
+# 1) 启动（控制台打印 ASCII 二维码 + 配对码，默认只监听 127.0.0.1:8765）
+& $py -m bridge --config bridge\config.example.toml
+
+# 2) 想联真实模型：先编辑 bridge/config.toml（复制 config.example.toml）
+#    [dsh] enabled = true / apiKey = "..." / provider / model
+#    （首次真调模型前，可先跑 `& $py -m bridge --self-test --smoke` 验证 runtime 能起）
+```
+
+### 2.3 用真实 ASR（不接手机也能验证）
+
+```powershell
+$env:PYTHONPATH = 'D:\code\apps\手机端\models\.pipdeps'   # 已装 sherpa-onnx 的机器不需要
+$env:PYTHONIOENCODING = 'utf-8'
+& 'D:\anaconda3\envs\scisim-agent\python.exe' bridge\state\real_asr_e2e.py
+```
+
+本机实测（`models/test_wavs/zh.wav`，真实 sherpa-onnx + SenseVoice）：
+
+```
+partials: 7 条   +1937 ms 开放时间 / +2906 ms 开放时间早 / +3219 ms 开放时间早上
+final_text: '开饭时间早上9点至下午5点。'
+final_after_stop: 515 ms（NFR-2 目标 ≤1500ms）
+RESULT: PASS
+```
+
+> 若用 `scripts/samples/speech_16k.wav`（合成样例）会得到空结果——那是给 bench 的占位样本，不是语音。
+
+### 2.4 性能基准（NFR 复核）
+
+```powershell
+$env:PYTHONPATH = 'D:\code\apps\手机端\models\.pipdeps'
+& 'D:\anaconda3\envs\scisim-agent\python.exe' scripts\bench_asr.py --backend sherpa --repeat 1 --assert-nfr
+```
+
+本机实测：first partial **p50 969–1000ms**（NFR ≤1000ms，余量很薄 → 风险 **R-09**）、final p50 313–500ms、partial 2.0/s、RTF 1.1×。
+
+## 3. 手机端：怎么看到 UI / 怎么出 APK
+
+### 3.1 现在就能看的 UI（mock 模式，不需要手机）
+
+```powershell
+cd app\web
+python -m http.server 8123
+# 浏览器打开 http://127.0.0.1:8123/?transport=mock
+# mock 配对码：123456
+```
+
+`?transport=mock` 是完整交互演示（会话/流式回复/工具状态/审批/提问/录音浮层），数据在内存与 IndexedDB。
+`?transport=ws` 才会连真实 Bridge（需要浏览器信任自签证书，V1 不推荐）；`native` 只在 App 里有效。
+
+### 3.2 出 APK（本机没有 JDK/Android SDK）
+
+- 本机**无法**构建 APK（D-006）→ 推到 GitHub 跑 CI：
+  1. 建仓库并 push（`.github/workflows/ci.yml` 已就绪）；
+  2. `android-build` job 会：同步 Web 资源 → 4 个离线自检 → 生成 gradle wrapper → `assembleDebug` → `testDebugUnitTest` → 上传 `app-debug-<versionName>-<versionCode>` 产物（保留 14 天）。
+- 首次 CI 最可能红的三处（按概率）：Kotlin 编译/R8 → OkHttp 自签 pinning → `sync_web.sh` 的 bash 实现（本机无法执行 bash 版）。
+
+## 4. 已验证 / 未验证（诚实清单）
+
+**已在本机真跑过并通过**
+
+| 项 | 命令 | 结果 |
+|---|---|---|
+| Bridge 单测 | `python -m pytest bridge\tests -q` | **114 passed** |
+| Bridge 启动 | `python -m bridge --config bridge\config.example.toml --run-for-seconds 3` | banner+二维码+配对 URI+优雅退出，exit 0 |
+| Bridge 自检 | `python -m bridge --self-test` / `--smoke` | 5 PASS / 6 PASS（含真 runtime start/close） |
+| 真 ASR | `bridge/state/real_asr_e2e.py` | PASS（见 §2.3） |
+| ASR 基准 | `scripts\bench_asr.py --backend sherpa` | NFR PASS |
+| Web 单测 | `cd app\web; node --test --test-isolation=none "tests/*.test.js"` | 122 tests 全绿 |
+| Android 静态 | `app\android\tools\{verify_protocol,check_contract,check_kotlin_static,check_gradle_config}.py` | 69 / 16+16 / 20 files / 63 checks 全 OK |
+| CI 配置 | `python ci/check_workflow.py --strict` + pyyaml 解析 | exit 0 / 4 jobs |
+| 本地 CI 复现 | `ci\run_tests.ps1 -AllowMissing` | exit 0（仅 APK 因无 SDK 跳过） |
+
+**未验证（需要你 / 需要环境）**
+
+1. **真机**：录音、蓝牙路由、前台服务、Keystore、WebView `appassets.local` —— 按 `app/android/README.md` 的 M3 runbook 逐条验收。
+2. **GitHub CI 首跑**：Kotlin 编译、APK 产物、JUnit 在 JDK17 上跑、bash 版 `sync_web.sh`。
+3. **真实模型调用**：Bridge 侧 SDK 接线只验证到 `start/initialize/start_session/close`；`session/prompt` 真调用需要你配 `apiKey` 后自测（注意 D-025 的 runtime 版本偏斜：本机 installed 是 `0.2.2-rc.1`，SDK 是 `0.2.2rc2`）。
+
+## 5. 沙箱/本机已知坑（踩过就记下来）
+
+| 坑 | 症状 | 处理 |
+|---|---|---|
+| DSH 沙箱 ACL | `pwsh` 全部失败（`SetNamedSecurityInfoW failed (Win32 5)` / `temp grant materialization failed`） | 已修：给工作区与 `D:\others\DSH\temp` 加当前用户可继承 FullControl（见 DECISIONS/.acl-recovery） |
+| 沙箱禁止 pip 写 site-packages | `sherpa-onnx` 装不进 conda 环境（Errno 13） | 手动解包到 `models/.pipdeps` + `PYTHONPATH`；正常机器直接 pip |
+| conda base 旧 onnxruntime.dll 抢 PATH | `requested API version [28] ... Current ORT Version is: 1.17.1` | 把 `site-packages/onnxruntime/capi/onnxruntime.dll` 复制到 `sherpa_onnx/lib/`（D-017） |
+| PowerShell 5.1 读中文乱码 | 库里中文显示成 `鏈壘鍒?` | 文件是 UTF-8，用编辑器/`-Encoding UTF8`；别以为是文件坏了 |
+| 沙箱内 `node --test` 全量跑 | `Error: spawn EPERM` | 用 `node --test --test-isolation=none "tests/*.test.js"`；ubuntu CI 不受影响 |
+| Windows 控制台 GBK | Bridge 启动时 `UnicodeEncodeError` 崩 | 已修：二维码自动降级 ASCII、banner 用 ASCII 边框 |
+| 工作区有 24 个删不掉的临时目录 | `pytest-cache-files-*` / `.tmp` / `.pip-tmp`（DSH deny ACE） | 已 gitignore，不影响仓库；无需强行清理 |
+
+## 6. 建议的下一步（按优先级）
+
+1. **真机验收（M3）**：装 debug APK → 照 `app/android/README.md` runbook 走 A/B/C/D/E 五组场景，把失败项记到 issue/README 的 gap 表。
+2. **CI 首跑**：push 到 GitHub，先看 `bridge-tests` + `web-tests`，再看 `android-build`；红了先看 job 里失败 step 的日志（`Show build diagnostics on failure` 会打印 SDK 路径）。
+3. **真模型联调**：在 `bridge/config.toml` 配 `apiKey/provider/model` + `[dsh].enabled=true`，用 App 或 mock 之外的真连接发一轮 `chat.send`，确认 `assistant.delta`/`tool.status`/审批弹窗。
+4. **M3 两个已接受缺口**（D-024）：G3（LE Audio 失败不回退 HFP）、G4（`MicService.onDestroy` 不清录音态）——真机复现后修。
+5. **性能余量**（R-09）：首字 969–1000ms 贴着 NFR 1000ms；V1.1 可换更小 chunk / 更轻模型。
+
+## 7. 关键文件索引
+
+```
+docs/PROTOCOL.md            协议 v1（冻结；子协议 dsphone.v1）
+docs/ARCHITECTURE.md        三端架构、JsBridge 契约、配置样例
+docs/DECISIONS.md           D-001…D-025 全部决策与理由
+docs/TESTPLAN.md            69 条用例 + PRD 39 个 FR 映射
+docs/SECURITY.md            STRIDE + 12 项安全设计 + 7 项安全测试
+docs/spike/SDK-SPIKE.md     SDK 0.2.2rc2 能力与限制（推翻了 PRD 的部分假设）
+bridge/__main__.py          Bridge 入口（--self-test / --smoke）
+bridge/connection.py        WSS 连接状态机、音频帧、VAD、重放/resync
+bridge/dsh_sdk.py           真 SDK 适配器（D-018…D-022）
+bridge/asr/sherpa.py        流式 zipformer + SenseVoice 定稿
+app/web/                    WebView UI（零依赖零构建；mock 可独立演示）
+app/android/README.md       Kotlin 工程说明 + 离线自检 + M3 真机 runbook
+.github/workflows/ci.yml    4 个 job：bridge-tests / web-tests / android-build / secrets-scan
+```

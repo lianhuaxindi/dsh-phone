@@ -142,3 +142,48 @@
 - 事实：SDK **从不搜 PATH**；`dsh_bin` 为空时用 wheel 内置 `deepseek-harness-sdk-runtime-win-x64.exe`（147,907,584 B，自报 `0.2.2-rc.2`），否则 resolve 给定路径；必须显式给 `dsh_home` 或 env `DSH_HOME`，否则 `ValueError: HarnessConfig requires an explicit dsh_home or non-empty DSH_HOME; the Python SDK never uses ~/.dsh implicitly`；argv = `(base…, "--profile", "sdk")`。
 - 决定：配置 `[dsh].runtimeExe`（空 = 自动探测 wheel 内置 exe；填路径则覆盖，例如本机 `D:\others\DSH\resources\runtime\cli\bin\dsh.cmd`）+ `[dsh].home`（默认 `state/dsh_home`，启动时绝对化并 mkdir）。**禁止**回落到用户桌面 `~/.dsh` 或 `C:\Users\15653\.dsh`（不能用桌面端凭据/会话，D-002）；因此 Bridge 首次真正调模型需要用户自己在 `bridge/config.toml` 里配 `api_key`/`provider`/`model`。
 - 依赖：`deepseek-harness-sdk==0.2.2rc2`（`--pre`）+ `deepseek-harness-runtime-bin==0.2.2rc2` 单列 `bridge/requirements-sdk.txt`；CI 不装（走 fake），避免 147MB 下载。
+
+## D-022 runtime 来源解析链与「真运行时不进 CI」的边界（补强 D-021）
+
+- 状态：已定（M1 SDK 真适配器冒烟实测，2026-11-17）。
+- 实测事实：
+  - 用 SDK wheel **内置** runtime exe（默认路径）在本机**不可用**：runtime 启动 2.6s 后退出，stderr 为
+    `Error: dsh: host preparation failed: No usable native binding found for node-addon-require-builtin-win32-x64-msvc (auto)`，
+    适配器侧表现为 `TransportClosedError: DeepSeek Harness runtime stdout closed`。
+  - 改用已安装 DSH 的 runtime（`D:\others\DSH\resources\runtime\cli\bin\dsh.cmd`）后，经 `bridge/dsh_sdk.py` 的
+    `start → initialize → start_session → close` **全链路成功**：start 5496.9ms（含 initialize 冷启动）、session 成功
+    （sdkSessionId `session-12008033c3074c42aabbfc374f30c448`）、close 110.8ms、无 `*runtime*` 残留进程；
+    全程未调用 `run()`/`session/prompt`（不烧 token）、无 api_key；`DSH_HOME=bridge/state/dsh_home_e2e`（独立，不碰桌面 `~/.dsh`）。
+- 决定：`[dsh].runtimeExe` 为空时按 **a) 显式配置/`DSH_PHONE_RUNTIME_EXE` 环境变量 → b) 本机已装 DSH（PATH 的 `dsh.cmd`/`dsh.exe`、常见安装目录候选）→ c) SDK wheel 内置 exe** 的顺序解析；**每步的候选路径、命中结果、失败原因都要写日志**。全部失败时报可读错误并给出下一步（安装 DSH 桌面版 / 配置 runtimeExe / 见本决策）。
+- 理由：产品是「手机端连用户电脑上的 DSH」，用户电脑本就装有 DSH；wheel 内置 runtime 只在「纯净 Python 环境」有意义，且当前版本在本机有原生绑定缺陷。两者都保留，避免把产品绑死在某一安装形态上。
+- 边界：**CI 永远不装 SDK/runtime、不跑真 runtime**（147MB+、`--pre`、且需要凭据），M1/M2 走 `[dsh].enabled=false` fake；真 runtime 只在用户机器上由 `--self-test` 冒烟（start/initialize/close，不发 prompt）。
+- 影响：`bridge --self-test` 必须能在无 SDK、无 runtime、无模型、无凭据的机器上给出 PASS/SKIP/FAIL 结论而非崩溃；错误文案须含「下一步怎么做」。
+
+## D-023 断线检测与「重连 ≤5s」的验收口径
+
+- 状态：已定（M2/M3 验收硬化，android-shell 提出 D3 场景歧义）。
+- 事实：协议心跳为服务端每 15s ping、60s 无响应断开（PROTOCOL §7）；客户端在「正常断线」与「黑洞（TCP 不 RST）」两种故障下的检测时延量级不同。
+- 决定：
+  1. **正常断线**（飞行模式切换、Wi-Fi 掉线、Bridge 进程被杀、TLS 握手失败）：OkHttp `onFailure` 立即触发 → 退避重连 1/2/4/8/15s → 网络恢复后 **≤5s 内回到 online**。PRD §15 的「断线重连 ≤5s」按**此口径**验收。
+  2. **黑洞**（网络物理断开但连接不报错）：靠 WebSocket ping/pong。`WssClient` 的 OkHttpClient **必须**配置 `pingInterval(15, TimeUnit.SECONDS)`（OkHttp 在连续无 pong 后主动关连接 → `onFailure` → 重连）；应用层 45s 无入站消息 watchdog 仅作兜底，**不得**作为正常重连路径。
+  3. 黑洞检测时延单独记实测值（预期 30–45s），不作为 NFR 失败；若真机测试认为不可接受，再评估把 pingInterval 降到 10s。
+- 理由：5s 目标来自「网络恢复后快速回到会话」的产品诉求，而不是要求黑洞秒级发现；把两者混为一谈会导致无谓的短心跳（耗电、断流风险）。
+- 影响：`app/android/README.md` 的 M3 runbook D3 必须写清两种口径与预期日志；TESTPLAN 的 NFR 用例按口径 1 判定。
+
+## D-024 已知缺口（M3 真机复现前接受）
+
+- 状态：已定（M2 静态复盘，android-shell 的 `app/android/README.md` 有逐条明细与修法）。
+- 已**修复**（M2 收尾）：G1 录音启动失败无 `audio.error`、G2 路由切换后 recorder 重启失败被忽略、G5 Activity finishing 时录音不停、G6 无 `audio.ready` 超时导致静默丢帧、G7 读失败缺 `DshPhone` 结构化日志。
+- **M3 真机复现后再处理/接受**：G3（LE Audio 失败不回退 HFP）、G4（`MicService.onDestroy` 不清录音态）。
+- 理由：这两项的正确行为依赖真实耳机/ROM 的时序与厂商实现，纯静态推断容易「改错方向」；V1 先记录、真机复现后修，避免把未知风险伪装成已解决。
+
+## D-025 runtime 版本偏斜（SDK 0.2.2rc2 ↔ installed runtime 0.2.2-rc.1）
+
+- 状态：已定（M1 冒烟实测）。
+- 事实：`deepseek-harness-sdk==0.2.2rc2` 自带的 wheel 内置 runtime 报 `0.2.2-rc.2`（本机因原生绑定缺陷不可用）；本机已安装 DSH 的 runtime 报 `0.2.2-rc.1`；用 rc.1 跑 `start → initialize → start_session → close` 成功（冷启动 4.1–5.5s、close 94–111ms），但**未验证 `session/prompt` 真模型调用**。
+- 决定：V1 **不强制** runtime 版本等于 SDK 版本；`--self-test` 与启动日志打印所选 runtime 的 `--version`，当与 SDK 声明版本不一致时记 WARNING（不阻断）。真 prompt 路径由用户在配置 `api_key` 后自测，若 rc.1 出现协议不兼容再要求安装与 SDK 匹配的 runtime。
+- 理由：产品定位是「连用户电脑上已装的 DSH」，用户机器上的 runtime 版本不受我们控制；把版本号写死会制造无法满足的前置条件。同时保留 upgraded 提示，避免 silently 用错版本。
+- 影响：`bridge/RUNTIME.md` 记录版本偏斜与本机实测；CI 不涉及（fake）。
+
+
+

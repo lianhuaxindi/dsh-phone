@@ -11,8 +11,10 @@
 - 审批需要并发 drain ``next_request()``（否则 turn 挂死）：专用 daemon 线程。
 - 提问来自 ``on_user_question`` handler（daemon 线程）：等待用户答案或超时取消。
 - SDK 无 cancel：``cancel_supported=False``，上层按 D-019 回 ``turn.error(3003)``。
-- 运行时发现：``[dsh].runtimeExe`` 为空时用 wheel 内置 exe；``[dsh].home`` 必填
-  （D-021，SDK 拒绝隐式 ``~/.dsh``）。
+- 运行时发现按 D-022 的顺序：``DSH_PHONE_RUNTIME_EXE`` → ``[dsh].runtimeExe`` →
+  本机已安装 DSH（%PATH% / 候选列表）→ SDK wheel 内置 runtime；每个候选都写
+  ``dsh.runtime.candidate`` 日志，全失败抛带候选明细的可读错误。
+- ``[dsh].home`` 必填（D-021，SDK 拒绝隐式 ``~/.dsh``）。
 """
 
 from __future__ import annotations
@@ -41,6 +43,11 @@ from .dsh import (
     DshSession,
     DshTool,
     DshTurn,
+)
+from .runtime import (
+    RuntimeResolution,
+    RuntimeUnavailable,
+    resolve_runtime,
 )
 
 logger = logging.getLogger("bridge.dsh_sdk")
@@ -415,6 +422,8 @@ class SdkDshClient(DshClient):
         self._turns: dict[str, SdkTurn] = {}
         self._turns_lock = threading.Lock()
         self._closed = False
+        #: D-022 runtime 解析结果（start() 后可用；含候选探测明细）。
+        self.runtime_resolution: RuntimeResolution | None = None
 
     # -- 属性 -------------------------------------------------------------
 
@@ -460,6 +469,14 @@ class SdkDshClient(DshClient):
         )
 
     def _sync_start(self) -> None:
+        # D-022：先解析 runtime（显式配置 → 已安装 DSH → wheel 内置），
+        # 每个候选都会写 dsh.runtime.candidate 日志；全失败抛可读错误。
+        resolution = resolve_runtime(self.config)
+        if resolution.selected is None:
+            raise RuntimeUnavailable(
+                resolution.error or "无法找到可用的 DSH SDK runtime", resolution
+            )
+        self.runtime_resolution = resolution
         sdk = _import_sdk()
         self._sdk = sdk
         kwargs: dict[str, Any] = {
@@ -467,8 +484,9 @@ class SdkDshClient(DshClient):
             "approval_requests": True,
             "on_user_question": self._on_user_question,
         }
-        if self.config.runtime_exe.strip():
-            kwargs["dsh_bin"] = str(Path(self.config.runtime_exe).expanduser().resolve())
+        if resolution.source != "bundled":
+            # bundled 由 SDK 自己按 wheel 内路径解析；其余来源显式传给 SDK
+            kwargs["dsh_bin"] = str(Path(resolution.selected).resolve())
         if self.config.provider.strip():
             kwargs["provider"] = self.config.provider
         if self.config.model.strip():

@@ -35,6 +35,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="冒烟测试用：运行指定秒数后自动优雅退出",
     )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help=(
+            "运行无副作用自检（配置/TLS/ASR/DSH runtime/日志脱敏），"
+            "输出人类摘要 + SELF_TEST_JSON；不发 prompt、不启动 WSS"
+        ),
+    )
+    parser.add_argument(
+        "--smoke",
+        action="store_true",
+        help="仅与 --self-test 搭配：额外做一次 SDK runtime start/initialize/close（冷启动约 5s）",
+    )
     parser.add_argument("--version", action="version", version=f"bridge {__version__}")
     return parser
 
@@ -101,6 +114,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"配置错误: {exc}", file=sys.stderr)
         return 2
     setup_logging(config.log, base_dir=config.base_dir, console=True)
+    if args.smoke and not args.self_test:
+        print("--smoke 只能与 --self-test 一起使用", file=sys.stderr)
+        return 2
+    if args.self_test:
+        from .self_test import run_self_test
+
+        return asyncio.run(run_self_test(config, smoke=args.smoke))
     try:
         return asyncio.run(
             run_server(config, run_for_seconds=args.run_for_seconds)
