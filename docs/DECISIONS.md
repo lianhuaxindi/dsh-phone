@@ -100,3 +100,45 @@
 - 背景：PROTOCOL §5.3 原写「服务端只存 sha256(token)」，但 §6.1 规定 HMAC key = token 原始 32 字节，服务端必须拿到原始 token 才能验签，两处矛盾。
 - 决策（已写入 PROTOCOL §5.3）：服务端持久化 `sha256(token)`（索引/吊销/可打印）与 **AES-256-GCM 封装的密文**（密钥 = 每安装独立的 `bridge/state/master.key`，文件 0600）；原始 token 绝不进日志/诊断/导出。
 - 备选（已否决）：把 HMAC key 改为 `sha256(token)`——服务端仍要存该值才能验签，安全增益为零却需重算全部测试向量。
+
+## D-017 ASR 真模型实测：延迟数据、NFR-1 风险登记与安装方式
+
+- 状态：已定（M1，asr-pipeline 交付后的实测结论；NFR 目标值不变，风险登记）。
+- **实测环境**：本机 CPU（无 NPU），Python 3.11.17（scisim-agent），sherpa-onnx 2.0.1，模型 = 流式 zipformer 中英双语 int8（encoder 173.5 MiB / decoder 12.5 MiB / joiner 3.1 MiB，合计 ~189 MiB）+ SenseVoice int8（~228 MiB）；样例 = 中文 4.88 s 语音（`scripts/samples/speech_16k.wav`，裁剪 700 ms 前导静音后），repeat=3。
+- **数据（p50）**：first partial **969 ms**（968/969/984）、final **313 ms**（313/313/344）、partial 速率 **2.0/s**（≤5 ✓）、RTF **1.1×**、当前流 chunk 解码 380–398 ms/chunk、SenseVoice 整段离线 289–319 ms/流。
+- **根因**：流式 zipformer 约需 1.7 s 音频上下文才吐首个非空 token（probe：audio=1700 ms 时首现文本）；样例前 0.7 s 是静音，故生产中 VAD 从开口起算首字 ≈0.97 s。
+- **风险 R-09（登记，不阻塞 V1）**：NFR-1「首字 ≤1.0 s」实测余量仅 16–31 ms，真机噪声/冷启动/后台争用下可能偶发超；V1.1 优化方向 = 更小 chunk（320→200/160 ms）、更轻量化模型档、或模型切换。NFR 目标值 **不因本机 CPU 实测而下调**。
+- **安装方式（重要）**：本会话沙箱禁止 pip 写 site-packages/temp（OSError Errno 13），故 sherpa-onnx 未装进 conda 环境；改为把 wheel 手动解包到仓库内 `models/.pipdeps/`（`models/*` 已 gitignore），`bridge/asr/sherpa.py` 自动把该目录注入 sys.path。**生产/CI 仍应按常规 `pip install sherpa-onnx==2.0.1`**（CI workflow 里作为可选 ASR extra 安装），仓库不提交任何二进制。
+- **运维坑（诊断页/README 提示）**：PATH 上 conda base 的旧 `onnxruntime.dll`（1.17.1）会遮盖 pip 安装的 1.32，报 `requested API version [28] ... Current ORT Version is: 1.17.1`；修复 = 把 `site-packages/onnxruntime/capi/onnxruntime.dll` 复制到 `sherpa_onnx/lib/` 同目录。
+- **识别质量**：ITN 生效（示例输出 `开饭时间早上9点至下午5点。`）；偶有近音误识（"开放"→"开饭"），V1.1 通过换模型/热词/后处理改进，V1 接受。
+- 模型下载：hf-mirror 108 s 完成，`scripts/download_models.py --verify` 两个模型 sha256 全部 OK。
+
+## D-018 `assistant.delta` 的语义：单帧整段 + 客户端本地打字机
+
+- 状态：已定（M0 spike 结论，`docs/spike/SDK-SPIKE.md` §6.1）。
+- 事实：SDK 0.2.2rc2 **没有任何 token 级增量事件**；文本只在 `assistant/message` 事件里整段到达（每 step 一条），`data.stream` 是结算后的记录、不能实时。
+- 决定：`assistant.delta` 保留，但语义 = 「文本追加片段」；本实现每 turn 只发 **1 条 `index=0` 的整段**（PROTOCOL §8 已注明）。客户端打字机动画是**本地渲染效果**，不是模型流式；UI/日志/诊断不得标称为「实时 token 流」。
+- 否决：Bridge 侧把整段按字符切片伪装成多帧 delta——违反「不伪造增量」，且会破坏 `index` 单调语义与重放。
+- 影响：M1 验收里「首字延迟」按「Bridge 收到 assistant/message → 客户端开始显示」计，不按 token 到达计。
+
+## D-019 `chat.cancel` 语义：SDK 不支持取消，必须如实报错
+
+- 状态：已定（spike §6.3）。
+- 事实：SDK 与协议层都没有 cancel/interrupt/stop，唯一手段是 `HarnessClient.close()`（shutdown + terminate/kill 整个运行时进程）。
+- 决定：V1 收到 `chat.cancel` 一律回 `turn.error{code:3003,"message":"cancel unsupported (SDK 0.2.2rc2)"}`（PROTOCOL §8 已注明），**不得**静默忽略、不得谎报 `assistant.done{gaveReason:"cancelled"}`。UI 侧「停止生成」按钮文案改为「停止（可能无效）」，并在诊断页记录该限制。
+- 未来：若 SDK 增加 cancel，或改用 Host API，再升级协议（`dsphone.v2`）实现真取消。
+
+## D-020 审批/提问字段映射与未知键透传
+
+- 状态：已定（spike §4.3/§6.2）。
+- 审批：`IncomingRequest{id, method:"approval/request", payload{sessionId,toolName,callId,reason}}` → `approval.request{id,tool,reason,callId,sessionId}`；回 `respond(id,{"outcome":"allowed-once"|"rejected"|"cancelled"})`。SDK **没有 options 字段**、唯一批准值是 `allowed-once`（没有「总是允许」）→ 协议不提供「记住选择」，V1 每次都要弹窗。
+- 未知键：`IncomingRequest.payload` 是原始 `JsonObject`，SDK 只建模 4 个字段；Bridge 必须**透传未建模键**到 `approval.request.extra`（可选 map），且不得因未知键解析失败。
+- 提问：`UserQuestionRequest{requestId,sessionId,questions[{id,question,options?}]}` → `question.request`；答 `{"answers":[{"id","selected":[],"custom"?}]}`；取消回**裸 dict** `{"cancelled": true}`（pydantic 模型无 cancelled 字段）；到期未答 = 取消结案并发 `question.expired`。
+- 审批超时 10 分钟默认拒绝（PROTOCOL §9），回 `{"outcome":"rejected"}` 而不是 `cancelled`。
+
+## D-021 SDK 运行时发现与独立 `dsh_home`（强化 D-002）
+
+- 状态：已定（spike §5）。
+- 事实：SDK **从不搜 PATH**；`dsh_bin` 为空时用 wheel 内置 `deepseek-harness-sdk-runtime-win-x64.exe`（147,907,584 B，自报 `0.2.2-rc.2`），否则 resolve 给定路径；必须显式给 `dsh_home` 或 env `DSH_HOME`，否则 `ValueError: HarnessConfig requires an explicit dsh_home or non-empty DSH_HOME; the Python SDK never uses ~/.dsh implicitly`；argv = `(base…, "--profile", "sdk")`。
+- 决定：配置 `[dsh].runtimeExe`（空 = 自动探测 wheel 内置 exe；填路径则覆盖，例如本机 `D:\others\DSH\resources\runtime\cli\bin\dsh.cmd`）+ `[dsh].home`（默认 `state/dsh_home`，启动时绝对化并 mkdir）。**禁止**回落到用户桌面 `~/.dsh` 或 `C:\Users\15653\.dsh`（不能用桌面端凭据/会话，D-002）；因此 Bridge 首次真正调模型需要用户自己在 `bridge/config.toml` 里配 `api_key`/`provider`/`model`。
+- 依赖：`deepseek-harness-sdk==0.2.2rc2`（`--pre`）+ `deepseek-harness-runtime-bin==0.2.2rc2` 单列 `bridge/requirements-sdk.txt`；CI 不装（走 fake），避免 147MB 下载。

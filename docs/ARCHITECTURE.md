@@ -70,6 +70,27 @@ bridge/
 - 每连接一个 `ConnectionState`；全局 `SessionRegistry` 管理会话 ↔ SDK 会话的映射。
 - 服务端保持"一个 turn 一个 task"：`assistant.delta/done` 由 SDK 通知回调驱动。
 
+### 2.2.1 SDK 接线规范（M0 spike 定稿，取证见 `docs/spike/SDK-SPIKE.md`）
+
+依据 `deepseek-harness-sdk 0.2.2rc2` 实测（**无 token 级流式、无 list/history、无 cancel**），`bridge/dsh.py` 按此实现：
+
+| SDK 事实 | Bridge 行为 |
+|---|---|
+| `start_session(session_id=None) -> Session` **不发 RPC**，只生成 `session-<uuid4hex>` | Bridge 自己生成 `sessionId`（`s-<hex>`）并存 `history.sqlite3`，同时记 `sdkSessionId`；`start_session(sdkSessionId)` 后 `run` |
+| `resume_session(sdkSessionId)`：不存在/不兼容抛异常，**旧事件不重放** | `session.resume` 先查自家 sqlite；SDK resume 失败 → `error 3001`（不静默新建） |
+| `run(input, *, session_id=None, on_notification=None) -> RunResult` 同步阻塞到 turn 结束 | 走 `ThreadPoolExecutor`；`on_notification` 在 SDK 线程把事件投 `asyncio.Queue`，事件循环消费 |
+| 通知 method 仅 `session.event`/`session.status`/`session.query.completed`/`subagent.started|finished`/`user-question.cancelled` | `session.event.payload.event`：`tool/call`→`tool.status(running)`；`tool/result`→`tool.status(ok/error)`；`assistant/message`→**单帧** `assistant.delta{index:0,text}`；`turn/end`→`assistant.done`（`finishReason`），`error`→`turn.error{3003}` |
+| **无 token 级增量**，文本整段到达（每 step 一条） | `assistant.delta` 每 turn 至多 1 条且为整段；客户端打字机是**本地渲染效果**，不得声称来自模型（D-018） |
+| `config.approval_requests=True` 后必须并发 drain `next_request()`，否则 turn 挂死 | 专用线程 `while: next_request()` → `approval.request{id,tool,reason,callId,sessionId}`；`respond(id,{"outcome":"allowed-once"|"rejected"|"cancelled"})` |
+| 审批 payload 仅 `sessionId/toolName/callId/reason`；`IncomingRequest.payload` 是原始 JSON | `approval.request` 透传未知键到可选 `extra` 字段；**不得**因未知键解析失败 |
+| 提问 handler 在 daemon 线程执行，`threading.Event` 是取消信号 | `question.request` → 用户答/超时 → `UserQuestionAnswer` 或裸 `{"cancelled": true}`；到期发 `question.expired` |
+| **无 cancel/interrupt/stop**，唯一手段 `close()` 杀进程 | `chat.cancel` 回 `turn.error{code:3003,"message":"cancel unsupported (SDK 0.2.2rc2)"}`；不得谎报取消（D-019） |
+| **无 list_sessions / read_history** | `session.list`/`session.history` 完全由 Bridge 的 `history.sqlite3` 提供 |
+| CLI 发现**从不查 PATH**：`dsh_bin` 空 → wheel 内置 runtime exe（147MB）；否则用给定路径；必须显式 `dsh_home`/`DSH_HOME`，否则 `ValueError: …never uses ~/.dsh implicitly` | 配置 `[dsh].runtimeExe`（空=自动探测 wheel 内置）+ `[dsh].home`（默认 `state/dsh_home`，绝对化）；**禁止**回落到用户桌面 `~/.dsh`（D-002） |
+| `provider`/`model` 经 initialize 传参，无运行时改模型 API | 模型变更需新会话；配置透传 |
+
+- 依赖：SDK 与 runtime **不进** `bridge/requirements.txt`（147MB+ 且 PyPI 为 `--pre`），单列 `bridge/requirements-sdk.txt`；CI 不装，`[dsh].enabled=false` 走 fake。
+
 ### 2.3 关键约束
 
 - 未认证连接 15s 内必须完成 auth；认证前只允许 hello/pair/auth/ping。

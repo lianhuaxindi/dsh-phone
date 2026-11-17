@@ -1,0 +1,16 @@
+# DSH Phone Bridge 运行依赖
+#
+# 目标环境: conda env scisim-agent (Python 3.11)
+# 安装: D:\anaconda3\envs\scisim-agent\python.exe -m pip install -r bridge\requirements.txt
+#
+# 注: 本仓库开发机沙箱可能禁止 pip 写盘；bridge/qr.py 会优先加载
+#     bridge/vendor/ 下的 qrcode 副本作为兜底。
+
+websockets>=17,<18
+cryptography>=50,<51
+httpx>=0.28,<1
+numpy>=2.4,<3
+pydantic>=2.14,<3
+qrcode>=8.2,<9
+
+# 测试依赖见 bridge/requirements-dev.txt（pytest>=9、pytest-asyncio>=1.4）。

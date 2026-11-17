@@ -197,12 +197,12 @@ S→C {"type":"turn.error","seq":24,"sessionId":"s-1","code":3003,"message":"mod
 ```
 
 规则：
-- `assistant.delta.text` 是**增量**片段；若 SDK 只提供整段（spike 结论），则只发一帧 `index=0` 的整段文本，App 用打字机动画呈现。
+- `assistant.delta` 的 `text` 是**追加片段**。V1 实际情况（spike 取证）：SDK 无 token 级增量、文本整段到达 → 每个 turn 只发 **1 条 `index=0` 的整段文本**；客户端打字机是**本地渲染效果**（D-018），不得把单帧伪装成多帧增量。
 - `tool.status.state`：`running | done | error`。
 - `finishReason`：`completed | error | cancelled`。
 - **幂等**：服务端按 `clientId` 去重（每会话保留最近 200 个）。重复 `chat.send` 只回 `chat.ack`（不再触发执行）。
 - **并发**：同一会话同时只允许 1 个进行中的 turn；忙 → `error{code:4001,"retryable":true}`，客户端排队或禁用发送按钮。
-- **停止生成**：`C→S {"type":"chat.cancel","seq":n,"sessionId":"s-1"}`；服务端尽力取消 → 最终必须发 `assistant.done{finishReason:"cancelled"}`；若 SDK 无取消能力（spike 结论），回 `turn.error{code:3003,"message":"cancel unsupported"}`。
+- **停止生成**：`C→S {"type":"chat.cancel","seq":n,"sessionId":"s-1"}`。SDK 0.2.2rc2 **没有** cancel/interrupt/stop（唯一手段是杀运行时进程）→ 服务端一律回 `turn.error{code:3003,"message":"cancel unsupported (SDK 0.2.2rc2)"}`，**不得**发 `assistant.done{finishReason:"cancelled"}` 谎报已取消（D-019）。客户端「停止」按钮文案需体现可能无效。
 
 ## 10. 音频与 ASR
 
@@ -250,6 +250,8 @@ S→C {"type":"approval.expired","seq":41,"id":"ap-1","outcome":"denied"}
 - `deadline`：Unix 秒（默认 10 分钟）；到期服务端按 `defaultOutcome`（默认 `denied`）结案并发 `approval.expired`。
 - 重复 `approval.response` 忽略；未知/已过期 `id` 忽略并记诊断日志（不返回错误帧，避免打断 UI）。
 - 客户端 UI 默认焦点在「拒绝」（安全，PRD §12）。
+- **映射（D-020）**：SDK 审批只有 `allowed-once`（单次允许）、`rejected`、`cancelled`，**没有「总是允许」** → 协议 `approved` ↔ SDK `allowed-once`、`denied` ↔ `rejected`；V1 不提供「记住我的选择」。
+- SDK 的审批 payload 只建模 `sessionId/toolName/callId/reason`，原始 JSON 可能含未建模键 → 服务端透传到可选字段 `extra`（对象，可缺省）；客户端必须容忍未知键。
 
 ### 11.2 提问
 

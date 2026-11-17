@@ -62,10 +62,14 @@ secrets/
 
 # --- 测试/构建临时产物（pytest 临时目录、pip 下载缓存、spike 轮子）---
 .tmp/
+.pip-tmp/
 pytest-cache-files-*/
 models/.tmp/
+models/.piptmp/
 scripts/spike/.tmp/
 scripts/spike/*.whl
 scripts/spike/*.tar.gz
+scripts/spike/.vendor/
+scripts/spike/.cache/
 bridge/vendor/**/tests/
 bridge/vendor/**/*.dist-info/

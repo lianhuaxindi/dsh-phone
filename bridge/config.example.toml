@@ -1,0 +1,52 @@
+# DSH Phone Bridge 配置示例
+#
+# 用法:
+#   D:\anaconda3\envs\scisim-agent\python.exe -m bridge --config bridge\config.example.toml
+#
+# 说明:
+# - 相对路径以“本配置文件所在目录”为基准，因此下列 state/... 会落在 bridge/state/。
+# - host 必须是具体监听地址（默认 127.0.0.1）；禁止 0.0.0.0，局域网访问请填本机局域网 IP。
+# - M1 阶段 [dsh].enabled=false：使用内置 Fake DSH（真实 SDK 接线规范见
+#   docs/ARCHITECTURE.md §2.2.1 与 docs/DECISIONS.md D-018..D-021）；
+#   启用真实 SDK 需安装 bridge/requirements-sdk.txt（--pre），CI 不安装。
+
+[server]
+host = "127.0.0.1"
+port = 8765
+maxConnections = 4
+
+[tls]
+certFile = "state/certs/bridge.crt"
+keyFile = "state/certs/bridge.key"
+
+[dsh]
+enabled = false
+home = "state/dsh_home"
+provider = ""
+model = ""
+# D-021：空 = 使用 SDK wheel 内置 runtime exe；也可填显式路径覆盖。
+# 例: runtimeExe = "D:/others/DSH/resources/runtime/cli/bin/dsh.cmd"
+runtimeExe = ""
+# 可选：API 凭据（留空则使用 SDK/环境默认）。apiKey 不会写入日志。
+apiKey = ""
+baseUrl = ""
+
+[asr]
+mode = "fake"
+lang = "zh"
+partialRatePerSec = 5
+silenceMs = 500
+
+[audio]
+sampleRate = 16000
+maxStreamSeconds = 120
+
+[security]
+pairCodeTtlSec = 120
+maxPairFailures = 5
+lockMinutes = 5
+authSkewSec = 120
+
+[log]
+level = "INFO"
+dir = "state/logs"

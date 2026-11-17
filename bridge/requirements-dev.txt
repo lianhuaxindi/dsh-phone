@@ -1,0 +1,14 @@
+# DSH Phone Bridge 测试依赖（CI 与本地开发）
+#
+# 安装:
+#   D:\anaconda3\envs\scisim-agent\python.exe -m pip install -r bridge\requirements-dev.txt
+#
+# CI 矩阵 (ubuntu/windows) 执行:
+#   python -m pytest bridge/tests -q --junitxml=bridge-test-results.xml -p no:cacheprovider
+#
+# 本地沙箱说明:
+#   部分开发机禁止写系统临时目录 / 创建 .pytest_cache，需显式指定:
+#   python -m pytest bridge/tests -q -p no:cacheprovider --basetemp=bridge\state\pytest-base
+
+pytest>=9,<10
+pytest-asyncio>=1.4

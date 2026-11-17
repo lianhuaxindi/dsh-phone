@@ -1,0 +1,13 @@
+# dsh-phone Bridge — Python SDK pins (verified by M0 spike, see docs/spike/SDK-SPIKE.md)
+#
+# install:  python -m pip install -r bridge/requirements-sdk.txt --pre
+#           (--pre is only needed if pip refuses the 0.2.2rc2 pre-release)
+#
+# deepseek-harness-runtime-bin is platform-specific; pip picks the matching
+# wheel (win_amd64 here). It ships a ~140 MB runtime executable, so installs are slow.
+#
+# transitive dependency pydantic>=2.12,<3 is already satisfied by
+# scisim-agent's pydantic 2.14.1 — deliberately NOT pinned here, no upgrade needed.
+
+deepseek-harness-sdk==0.2.2rc2
+deepseek-harness-runtime-bin==0.2.2rc2
