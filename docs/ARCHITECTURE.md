@@ -178,18 +178,16 @@ Web → Native（`window.DshNative.post(msg)`）：
 
 Native → Web（`window.DshBridge.onEvent(json)`）：`net.state` / `proto.message`（协议原样透传）/ `audio.state` / `audio.route` / `audio.level`（波形）/ `error`。
 
-**客户端本地 `audio.error` 码表**（Native 判定、经 `audio.error` 上报；`retryable` 表示 UI 可直接提供「重试」）：
+**客户端本地 `audio.error` 码族**（Native 判定、经 `audio.error` 上报；`retryable=true` 表示 UI 可直接提供「重试」。用列表而非表格，避免被 `app/android/tools/check_contract.py` 误解析成 op 表）：
 
-| code | 触发条件 | retryable |
-|---|---|---|
-| `permission_denied` | `RECORD_AUDIO` 未授权 | false（引导去系统设置） |
-| `audio_busy` | 已有音频流处于 STARTING/RECORDING/STOPPING | false |
-| `offline` | `startAudio` 时 WSS 未在线 | true |
-| `recorder_failed` | `AudioRecord` 启动失败、读循环错误达 5 次、路由切换后重建失败 | true |
-| `route_failed` | 蓝牙/SCO 路由切换失败 | true |
-| `audio_timeout` | `audio.start` 后 3s 内未收到 `audio.ready`（`ACK_TIMEOUT_MS=3000`） | true |
-| `max_duration` | 单流 120s 上限 | false |
-| `connection_lost` | 录音过程中 WSS 断开 | true |
+- `permission_denied` — `RECORD_AUDIO` 未授权，`retryable=false`（引导去系统设置）。
+- `audio_busy` — 已有音频流处于 STARTING/RECORDING/STOPPING，`retryable=false`。
+- `offline` — `startAudio` 时 WSS 未在线，`retryable=true`。
+- `recorder_failed` — `AudioRecord` 启动失败、读循环错误达 5 次、路由切换后重建失败，`retryable=true`。
+- `route_failed` — 蓝牙/SCO 路由切换失败，`retryable=true`。
+- `audio_timeout` — `audio.start` 后 3s 内未收到 `audio.ready`（`ACK_TIMEOUT_MS=3000`），`retryable=true`。
+- `max_duration` — 单流 120s 上限，`retryable=false`。
+- `connection_lost` — 录音过程中 WSS 断开，`retryable=true`。
 
 （这些是**本地**码，不在 PROTOCOL §13 的服务端错误码表里；服务端错误仍走 `error{code:1001/2001/2002/...}`。Web 对 `audio.error.code` 不透明透传。）
 

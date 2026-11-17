@@ -64,7 +64,25 @@ RESULT: PASS
 
 > 若用 `scripts/samples/speech_16k.wav`（合成样例）会得到空结果——那是给 bench 的占位样本，不是语音。
 
-### 2.4 性能基准（NFR 复核）
+### 2.4 一条命令端到端自证（不用手机）
+
+`scripts/e2e_phone_sim.py` 用 Python 客户端**扮演 Android App**，走完整 `dsphone.v1` 协议：hello → pair → auth(HMAC) → session.* → chat.send → audio.start → 20ms 帧 → asr.partial/final → 心跳 → 边界（错误子协议 4400、未认证 1001+4401）。默认进程内起真实 Bridge（端口 0、自签 TLS、独立 `bridge/state/e2e_phone_home`，不碰 `~/.dsh`），也可 `--url wss://… --pair-code …` 连已启动的 Bridge。
+
+```powershell
+$py = 'D:\anaconda3\envs\scisim-agent\python.exe'
+& $py scripts\e2e_phone_sim.py --asr fake        # CI 口径，约 20s
+$env:PYTHONPATH = 'D:\code\apps\手机端\models\.pipdeps'
+& $py scripts\e2e_phone_sim.py --asr sherpa      # 真模型，约 26s
+```
+
+本机实测：
+
+| 模式 | 结果 | 关键指标 |
+|---|---|---|
+| `--asr fake` | **PASS，21 checks，exit 0**（19.8s） | pair→auth 2.1ms、chat.send→done 4.8ms、partials 7 条、final aseq=150 |
+| `--asr sherpa` | **PASS，22 checks，exit 0**（26.5s） | 模型加载 ~5.8s、audio.start→首 partial **1397.9ms**、audio.stop→final **314.2ms** |
+
+### 2.5 性能基准（NFR 复核）
 
 ```powershell
 $env:PYTHONPATH = 'D:\code\apps\手机端\models\.pipdeps'
@@ -104,6 +122,7 @@ python -m http.server 8123
 | Bridge 启动 | `python -m bridge --config bridge\config.example.toml --run-for-seconds 3` | banner+二维码+配对 URI+优雅退出，exit 0 |
 | Bridge 自检 | `python -m bridge --self-test` / `--smoke` | 5 PASS / 6 PASS（含真 runtime start/close） |
 | 真 ASR | `bridge/state/real_asr_e2e.py` | PASS（见 §2.3） |
+| **端到端（模拟手机）** | `scripts\e2e_phone_sim.py --asr fake` / `--asr sherpa` | **21 checks / 22 checks PASS，exit 0**（见 §2.4） |
 | ASR 基准 | `scripts\bench_asr.py --backend sherpa` | NFR PASS |
 | Web 单测 | `cd app\web; node --test --test-isolation=none "tests/*.test.js"` | 122 tests 全绿 |
 | Android 静态 | `app\android\tools\{verify_protocol,check_contract,check_kotlin_static,check_gradle_config}.py` | 69 / 16+16 / 20 files / 63 checks 全 OK |

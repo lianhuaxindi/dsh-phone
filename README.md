@@ -57,6 +57,7 @@ $py = 'D:\anaconda3\envs\scisim-agent\python.exe'
 $py = 'D:\anaconda3\envs\scisim-agent\python.exe'
 & $py -m pytest bridge\tests -q -p no:cacheprovider        # 114 passed
 & $py -m bridge --self-test                                 # 5 PASS
+& $py scripts\e2e_phone_sim.py --asr fake                   # 21 checks PASS（模拟手机走完整协议）
 cd app\web; node --test --test-isolation=none "tests/*.test.js"; cd ..   # 122 pass
 foreach ($s in 'verify_protocol','check_contract','check_kotlin_static','check_gradle_config') {
   & $py "app\android\tools\$s.py" }                         # 全 OK
