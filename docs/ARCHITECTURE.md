@@ -10,7 +10,7 @@
 │  WebView UI (app/web, 纯 HTML/JS/CSS)               │
 │        ⇅  JsBridge(WebMessage)                       │
 │  Kotlin 壳 (app/android): 录音/蓝牙/前台服务/Keystore │
-│        ⇅  WSS dsphone/1 (TLS + 指纹 pinning)         │
+│        ⇅  WSS dsphone.v1 (TLS + 指纹 pinning)        │
 └───────────────────────┬─────────────────────────────┘
                         │ 局域网 / Tailscale
 ┌───────────────────────▼─────────────────────────────┐
@@ -151,10 +151,22 @@ Web → Native（`window.DshNative.post(msg)`）：
 | `preferDevice` | `{address?}` | `settings.audioRoute` |
 | `notify` | `{title,text}` | —（审批后台提醒，P1） |
 | `exportLogs` | `{}` | `logs.exported`（脱敏） |
+| `reconnect` | `{}` | `net.state`（诊断页「重连 Bridge」；断开并重建连接，**不**重启 Bridge 进程，见 D-013） |
+| `scanPairing` | `{}` | `pair.scanned`（V1 固定返回 `{supported:false,reason:"m3"}`，见 D-011） |
 
 Native → Web（`window.DshBridge.onEvent(json)`）：`net.state` / `proto.message`（协议原样透传）/ `audio.state` / `audio.route` / `audio.level`（波形）/ `error`。
 
 规则：Web 侧不直接持有 token；音频二进制帧由 Native 直接组帧发送（不经 WebView，避免 JS 拷贝抖动）。
+
+### 3.2.1 seq 权威与本地关联字段（冻结）
+
+- **`seq` 由 Native 独占**（D-012）：Web 侧 `send` 不生成、不依赖 `seq`，Native 解析 JSON 后覆盖式注入本方向下一个 `seq` 再上行；入站 S→C `seq` 也由 Native 记账（重连 `resync{lastSeq}` 用 Native 记录值）。理由：Native 同时发握手/心跳/音频控制帧，Web 与 Native 各自计数必然撞号，而协议要求每方向单调。
+- **`_reqId` / `_reqTo`**：Web 可在消息里带本地字段 `_reqId`（任意字符串），Native **剥离后不出网**；Native 收到服务端消息若其 `replyTo` 命中某个已发出的 `seq`，把对应 `_reqId` 回填为 `_reqTo` 一并转发给 Web。Web 匹配响应优先用 `_reqTo`，其次 `clientId`（`chat.ack`）、`id`（审批/提问）。Mock 传输必须模拟同一行为，保证 mock 与真机一致。
+- **Web 资源 origin**：`https://appassets.local/`，由 `shouldInterceptRequest` 从 `assets/web/` 读。必须给正确 MIME（`.js`→`text/javascript`、`.json`→`application/json`、`.css`→`text/css`），否则 ES module 加载失败；`index.html` 内一律用相对路径（`./js/...`），保证 `python -m http.server` 也能调试。
+- **返回键**：`window.DshBridge.onBack(): boolean`，返回 `true` 表示已由 UI 处理（关闭 Sheet / 返回列表）；`false` 交给系统。
+- **重连**：由 Native 自动负责（退避 1/2/4/8/15s），Web 只消费 `net.state`；诊断页「重连 Bridge」= `reconnect` op（D-013）。
+- **音频**：二进制帧由 Native 直发，不经 WebView。
+- **扫码**：M2 手动输入配对（host/port/fp/code，或粘贴整条 `dsphone://pair...` URI）；`scanPairing` 为预留 op（D-011）。
 
 ### 3.3 UI 状态机
 

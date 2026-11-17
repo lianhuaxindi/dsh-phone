@@ -3,7 +3,7 @@
 | 项 | 值 |
 |---|---|
 | 版本 | **v1.0 FROZEN**（2026-11-17，M0 Phase0 冻结） |
-| 子协议 | `dsphone/1` |
+| 子协议 | `dsphone.v1`（RFC 6455 token 语法，**不含 `/`**；见 D-015） |
 | 适用 | 手机 App（C，客户端） ⇄ 电脑端 Bridge（S，服务端） |
 | 上游依据 | `docs/PRD.md` §10 |
 | 变更流程 | 见 §15；改动需 Lead 评审并同步 bridge/app 测试 |
@@ -16,7 +16,7 @@
 ## 1. 传输层
 
 - 端点：`wss://<host>:<port>/ws`
-- 子协议：`Sec-WebSocket-Protocol: dsphone/1`；服务端必须回显该子协议，否则客户端断开。
+- 子协议：`Sec-WebSocket-Protocol: dsphone.v1`；服务端必须回显该子协议，否则客户端断开。
 - TLS：≥ TLS 1.2；Bridge 使用自签证书。客户端做 **SHA-256 证书指纹 pinning**：
   - `fp` = 服务器证书 DER 字节的 SHA-256，小写 hex（64 字符）。
   - App 首次配对时记录 `fp`（来自二维码或手动输入）；之后每次连接校验，不匹配即拒绝（视为中间人）。
@@ -42,7 +42,7 @@
 ## 3. 连接生命周期
 
 ```
-C: WS connect (subprotocol dsphone/1, TLS verify)
+C: WS connect (subprotocol dsphone.v1, TLS verify)
 C→S hello
 S→C hello.ok {needPair}
   needPair=true  → C→S pair.request → S→C pair.ok | pair.error
@@ -111,7 +111,7 @@ dsphone://pair?v=1&host=192.168.1.10&port=8765&fp=<64hex>&code=123456&sid=srv-1a
 {"type":"pair.error","seq":3,"replyTo":2,"code":1002,"message":"pair code expired","attemptsLeft":2,"retryable":true}
 ```
 
-- `deviceToken`：32 随机字节（base64 传输）。服务端只存 `sha256(token)` + deviceId + deviceName + createdAt；客户端存 Keystore（V1 用 EncryptedSharedPreferences）。
+- `deviceToken`：32 随机字节（base64 传输）。服务端持久化两份：`sha256(token)`（设备索引/吊销校验，可安全落库与打印）+ **密文**（AES-256-GCM 封装，密钥为每份安装独立的 `bridge/state/master.key`，文件权限 0600；因 §6.1 校验 HMAC 必须用原始 token）。原始 token 严禁写入日志/诊断/导出。客户端存 Keystore（V1 用 EncryptedSharedPreferences）。
 - `expiresAt: null` = 长期有效，直到被撤销。
 - 撤销设备后：该 token 立即 `auth` 失败（1001），已在线连接被关闭（4401）。
 
@@ -290,11 +290,13 @@ S→C {"type":"question.expired","seq":51,"id":"q-1","cancelled":true}
 |---|---|
 | 1000 | 正常关闭 |
 | 1011 | 服务端内部错误 |
-| 4400 | 协议错误（非法 JSON / 未知 type / 缺信封字段） |
+| 4400 | 协议错误（非法 JSON / 缺信封字段 / 字段类型错误；**不含**未知 `type`，见下条） |
 | 4401 | 认证失败或未认证 |
 | 4402 | 协议版本不匹配 |
 | 4408 | 心跳超时 |
 | 4410 | 配对尝试过多，已锁定 |
+
+**未知 `type` 的处理（与 §14 一致，澄清）**：接收方遇到不认识的 `type` 必须**忽略并记诊断日志**，不得断开或回 4400（前向兼容）；只有结构性错误（非法 JSON、缺 `v`/`type`/`seq`、字段类型错误、帧过大）才用 4400 断开。§14 的兼容规则优先于本表中的 4400 说明。
 
 ## 13. 背压与限制
 
@@ -315,7 +317,7 @@ S→C {"type":"question.expired","seq":51,"id":"q-1","cancelled":true}
 
 ## 14. 版本与兼容
 
-- `v` 为主版本号；任何不兼容改动 → 子协议升级为 `dsphone/2`。
+- `v` 为主版本号；任何不兼容改动 → 子协议升级为 `dsphone.v2`。
 - `hello.ok.bridge` 报 Bridge 版本；App 发现协议不兼容时提示升级（PRD FR-xx / §16）。
 - 新增**可选**字段不升版本；接收方必须忽略未知字段与未知 `type`（记录诊断，不崩溃）。
 

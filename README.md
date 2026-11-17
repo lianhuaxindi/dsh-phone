@@ -4,7 +4,7 @@
 
 - **手机端**：Android App（Kotlin 原生壳 + WebView HTML/JS UI）
 - **电脑端**：Python Bridge 进程（WSS 服务端 + 配对认证 + ASR + DSH SDK）
-- **链路**：`App ⇄ wss(dsphone/1) ⇄ Bridge ⇄ deepseek-harness-sdk ⇄ dsh --profile sdk`
+- **链路**：`App ⇄ wss(dsphone.v1) ⇄ Bridge ⇄ deepseek-harness-sdk ⇄ dsh --profile sdk`
 
 > 详细需求见 [docs/PRD.md](docs/PRD.md)；协议见 [docs/PROTOCOL.md](docs/PROTOCOL.md)；架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
