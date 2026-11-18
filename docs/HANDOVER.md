@@ -29,7 +29,24 @@
 | sherpa-onnx | 手动解包到 `models/.pipdeps`（gitignored） | 沙箱里 pip 装不进环境，用 `PYTHONPATH` 注入；正常机器直接 `pip install sherpa-onnx==2.0.1` |
 | DSH runtime | 自动探测到 `D:\others\DSH\resources\runtime\cli\bin\dsh.cmd` | 走 D-022 解析链；SDK wheel 内置 runtime 在本机不可用 |
 
-### 2.2 三步启动 Bridge
+### 2.2 启动 Bridge
+
+**一键（推荐，尤其给手机连）**：双击 `scripts\start_bridge.cmd`。它会：
+
+1. 自动挑 Python（默认 `D:\anaconda3\envs\scisim-agent\python.exe`，可用 `-Py` / 环境变量 `DSH_PHONE_PYTHON` 覆盖）；
+2. 用 `scripts/bridge_lan.py` 自动检测本机局域网 IPv4（跳过回环/APIPA/代理 fake-IP `198.18.*`，跳过 VMware VMnet / VirtualBox / Hyper-V / WSL / docker / Mihomo TUN 等虚拟网卡，优先 WLAN）；
+3. 复制 `bridge\config.example.toml` → 生成 `bridge\config.local.toml`（改 host/port/pairCodeTtlSec，**不动**仓库里的正式示例；该文件已 gitignore）；
+4. 前台启动 Bridge，窗口直接打印配对码 / 64 位指纹 / 配对 URI，过期自动轮换新码。
+
+```powershell
+scripts\start_bridge.cmd                       # 双击等价；默认配对码 900 秒、端口 8765
+scripts\stop_bridge.cmd                        # 停止（WMI 不可用时按端口回退匹配，只杀 python -m bridge）
+powershell -File scripts\start_bridge.ps1 -DryRun                     # 只看检测结果与将执行的命令
+powershell -File scripts\start_bridge.ps1 -Port 8766 -PairCodeTtlSec 120
+powershell -File scripts\start_bridge.ps1 -HostAddress 192.168.1.23   # 手动指定 IP
+```
+
+等价手动步骤：
 
 ```powershell
 $py = 'D:\anaconda3\envs\scisim-agent\python.exe'

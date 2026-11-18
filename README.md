@@ -28,6 +28,17 @@ models/        sherpa-onnx 模型（不入库，脚本下载）
 
 前置：Python 3.10+（本机使用 conda 环境 `scisim-agent`）。
 
+**一键启动（推荐，给手机连）：双击 `scripts\start_bridge.cmd`。** 脚本会自动选 Python、自动检测本机局域网 IPv4（排除 VMware/Mihomo 等虚拟网卡，优先 WLAN）、生成 `bridge\config.local.toml`（不动仓库里的示例配置）、打印配对码/指纹/配对 URI 并前台运行；停止按 `Ctrl+C`，或双击 `scripts\stop_bridge.cmd`。手机需与电脑连同一 Wi-Fi。
+
+```powershell
+scripts\start_bridge.cmd                          # 双击等价；自动检测局域网 IP，配对码默认 900 秒
+powershell -File scripts\start_bridge.ps1 -Port 8766 -PairCodeTtlSec 120   # 换端口 / 用正式 TTL
+powershell -File scripts\start_bridge.ps1 -HostAddress 192.168.1.23        # 手动指定 IP
+scripts\stop_bridge.cmd                           # 停止：按端口+命令行匹配，只杀 python -m bridge
+```
+
+等价的手动步骤：
+
 ```powershell
 $py = 'D:\anaconda3\envs\scisim-agent\python.exe'
 
@@ -37,8 +48,8 @@ $py = 'D:\anaconda3\envs\scisim-agent\python.exe'
 # 2) 自检（2.6s；无需模型/凭据，不烧 token）
 & $py -m bridge --self-test
 
-# 3) 启动 Bridge（默认只监听 127.0.0.1，安全默认；控制台打印二维码+配对码）
-& $py -m bridge --config bridge\config.example.toml
+# 3) 启动 Bridge（默认只监听 127.0.0.1，手机连不上；给手机接入加 --host <本机局域网 IP>）
+& $py -m bridge --config bridge\config.example.toml --host 10.5.19.39
 ```
 
 手机端 UI 可以先在浏览器里看（mock 模式，不需要手机）：`cd app\web; python -m http.server 8123` → 打开 <http://127.0.0.1:8123/?transport=mock>（配对码 `123456`）。

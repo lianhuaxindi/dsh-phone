@@ -76,3 +76,4 @@ scripts/spike/.vendor/
 scripts/spike/.cache/
 bridge/vendor/**/tests/
 bridge/vendor/**/*.dist-info/
+bridge/config.local.toml
