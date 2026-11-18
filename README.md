@@ -29,7 +29,7 @@ models/        sherpa-onnx 模型（不入库，脚本下载）
 
 前置：Python 3.10+（本机使用 conda 环境 `scisim-agent`）。
 
-**一键启动（推荐，给手机连）：双击 `scripts\start_bridge.cmd`。** 脚本会自动选 Python、自动检测本机局域网 IPv4（排除 VMware/Mihomo 等虚拟网卡，优先 WLAN）、生成 `bridge\config.local.toml`（不动仓库里的示例配置）、打印配对码/指纹/配对 URI 并前台运行；停止按 `Ctrl+C`，或双击 `scripts\stop_bridge.cmd`。手机需与电脑连同一 Wi-Fi。
+**一键启动（推荐，给手机连）：双击 `scripts\start_bridge.cmd`。** 脚本会自动选 Python、自动检测本机局域网 IPv4（排除 VMware/Mihomo 等虚拟网卡，优先 WLAN，且只接受真正能 bind 的地址）、生成/更新 `bridge\config.local.toml`（不动仓库里的示例配置；**已有该文件时只更新地址/端口/配对码有效期，保留你填的 `[dsh] apiKey` 等**）、打印配对码/指纹/配对 URI 并前台运行；停止按 `Ctrl+C`，或双击 `scripts\stop_bridge.cmd`。手机需与电脑连同一 Wi-Fi。
 
 ```powershell
 scripts\start_bridge.cmd                          # 双击等价；自动检测局域网 IP，配对码默认 900 秒
@@ -72,7 +72,7 @@ app\android\app\build\outputs\apk\debug\app-debug.apk
 
 重新出包 / 第一次在新机器上装工具链 / 沙箱下跑单测的完整步骤见 **[app/android/BUILD-LOCAL.md](app/android/BUILD-LOCAL.md)**（12 章，含可复制命令与故障排查表）；决策记录见 `docs/DECISIONS.md` 的 D-027。
 
-配真实模型只需要一步：编辑 `bridge\config.local.toml`（一键脚本生成）或复制 `bridge\config.example.toml` 后填 `[dsh] apiKey = "sk-..."`；也可以设环境变量 `DEEPSEEK_API_KEY` / `DSH_PHONE_API_KEY`（详见 D-028）。
+配真实模型只需要一步：编辑 `bridge\config.local.toml`（一键脚本生成的；填好后再次双击启动不会被覆盖）或复制 `bridge\config.example.toml` 后填 `[dsh] apiKey = "sk-..."`；也可以设环境变量 `DEEPSEEK_API_KEY` / `DSH_PHONE_API_KEY`（详见 D-028）。
 
 ## 开发状态
 

@@ -37,7 +37,7 @@
 
 1. 自动挑 Python（默认 `D:\anaconda3\envs\scisim-agent\python.exe`，可用 `-Py` / 环境变量 `DSH_PHONE_PYTHON` 覆盖）；
 2. 用 `scripts/bridge_lan.py` 自动检测本机局域网 IPv4（跳过回环/APIPA/代理 fake-IP `198.18.*`，跳过 VMware VMnet / VirtualBox / Hyper-V / WSL / docker / Mihomo TUN 等虚拟网卡，优先 WLAN）；
-3. 复制 `bridge\config.example.toml` → 生成 `bridge\config.local.toml`（改 host/port/pairCodeTtlSec，**不动**仓库里的正式示例；该文件已 gitignore）；
+3. 生成/更新 `bridge\config.local.toml`（改 host/port/pairCodeTtlSec，**不动**仓库里的正式示例；该文件已 gitignore；**已存在时只改这三项，保留你填的 `[dsh] apiKey`**）；
 4. 前台启动 Bridge，窗口直接打印配对码 / 64 位指纹 / 配对 URI，过期自动轮换新码。
 
 ```powershell

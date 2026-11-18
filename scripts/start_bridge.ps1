@@ -185,17 +185,41 @@ if ($busy) {
 }
 
 # --------------------------------------------------------------------------
-# 5. 生成 config.local.toml
+# 5. 生成/更新 config.local.toml
+#    已有 config.local.toml 时**只改地址/端口/配对码有效期**，保留用户填的
+#    [dsh] apiKey 等配置（之前每次启动都从示例覆盖，会把 apiKey 冲掉）。
 # --------------------------------------------------------------------------
 $configPath = $Config
 if (-not $configPath) {
     Write-Info "生成 $localConfig ..."
-    $text = Get-Content -LiteralPath $exampleConfig -Raw -Encoding UTF8
-    $text = [regex]::Replace($text, '(?m)^host\s*=\s*".*?"\s*$', 'host = "' + $HostAddress + '"')
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    $template = $null
+    $keptUserConfig = $false
+    if (Test-Path -LiteralPath $localConfig) {
+        $existing = Get-Content -LiteralPath $localConfig -Raw -Encoding UTF8
+        if ([regex]::IsMatch($existing, '(?m)^host\s*=')) {
+            $template = $existing
+            $keptUserConfig = $true
+        }
+    }
+    if ($null -eq $template) {
+        $template = Get-Content -LiteralPath $exampleConfig -Raw -Encoding UTF8
+    }
+    $text = [regex]::Replace($template, '(?m)^host\s*=\s*".*?"\s*$', 'host = "' + $HostAddress + '"')
     $text = [regex]::Replace($text, '(?m)^port\s*=\s*\d+\s*$', 'port = ' + $Port)
     $text = [regex]::Replace($text, '(?m)^pairCodeTtlSec\s*=\s*\d+\s*$', 'pairCodeTtlSec = ' + $PairCodeTtlSec)
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    if (-not [regex]::IsMatch($text, '(?m)^host\s*=\s*"')) {
+        # 现有文件结构异常（host 行被改坏），退回示例模板重建
+        $text = Get-Content -LiteralPath $exampleConfig -Raw -Encoding UTF8
+        $text = [regex]::Replace($text, '(?m)^host\s*=\s*".*?"\s*$', 'host = "' + $HostAddress + '"')
+        $text = [regex]::Replace($text, '(?m)^port\s*=\s*\d+\s*$', 'port = ' + $Port)
+        $text = [regex]::Replace($text, '(?m)^pairCodeTtlSec\s*=\s*\d+\s*$', 'pairCodeTtlSec = ' + $PairCodeTtlSec)
+        $keptUserConfig = $false
+    }
     [System.IO.File]::WriteAllText($localConfig, $text, $utf8NoBom)
+    if ($keptUserConfig) {
+        Write-Note "已保留 config.local.toml 中的其它配置（如 [dsh] apiKey），只更新了地址/端口/配对码有效期。"
+    }
     $configPath = $localConfig
 } else {
     if (-not (Test-Path -LiteralPath $configPath)) {

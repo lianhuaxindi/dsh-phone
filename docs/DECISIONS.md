@@ -306,3 +306,4 @@
   3. `scripts/bridge_lan.py` 复用同一实现，无需改。
 - 验证：`scripts\bridge_lan.py --json` → `{"best":"10.15.187.127",…}`；`scripts\start_bridge.ps1` 端到端 → banner `监听 10.15.187.127:8765`、配对码 959766、`二维码图片 …\bridge\state\qr.png`、`server.started`，`-Stop` 正常退出并释放端口；新增 `bridge/tests/test_netinfo.py`（8 例：英文/中文标签、折行网关、掩码、`is_bindable`、候选过滤、`pairing_hosts` 不混入不可 bind 地址），全量 `pytest bridge\tests` → **154 passed**。
 - 教训：从 `ipconfig` 文本里抓 IP 不能「整块正则扫」，必须认标签；凡是「拿来自动填配置」的地址，落盘前先做一次 bind 探测（代价 1ms，省一次启动失败）。
+- 附带修复（同一提交）：一键脚本原来每次启动都从示例**重写** `config.local.toml`，用户填的 `[dsh] apiKey` 会被冲掉 → 现在若文件已存在且含 `host` 行，只在原文件上替换 `host`/`port`/`pairCodeTtlSec`，其余内容（apiKey、model 等）原样保留（DryRun 实测：`host 1.2.3.4 → 10.15.187.127`，`apiKey` 保留）。另：`scripts/*.ps1` 必须保持 **UTF-8 BOM**，编辑后若丢 BOM，PowerShell 5.1 会按 GBK 解码中文并在语法层报 `The string is missing the terminator`（本次已踩，已恢复 BOM）。
