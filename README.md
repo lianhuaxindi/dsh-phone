@@ -44,6 +44,17 @@ $py = 'D:\anaconda3\envs\scisim-agent\python.exe'
 手机端 UI 可以先在浏览器里看（mock 模式，不需要手机）：`cd app\web; python -m http.server 8123` → 打开 <http://127.0.0.1:8123/?transport=mock>（配对码 `123456`）。
 完整上手、真 ASR 验证、出 APK、已知坑与「未验证清单」见 **[docs/HANDOVER.md](docs/HANDOVER.md)**。
 
+## 出 APK（本机已出包，不需要 CI）
+
+本机工具链已装在工作区 `.tools/`（JDK 17 + Android SDK 35 + Gradle 8.9，均已 gitignore），**debug APK 已构建成功**：
+
+```
+app\android\app\build\outputs\apk\debug\app-debug.apk
+→ 3,867,632 B  ·  com.dsh.phone 1.0.0 (10000)  ·  minSdk 29 / targetSdk 35
+```
+
+重新出包 / 第一次在新机器上装工具链 / 沙箱下跑单测的完整步骤见 **[app/android/BUILD-LOCAL.md](app/android/BUILD-LOCAL.md)**（12 章，含可复制命令与故障排查表）；决策记录见 `docs/DECISIONS.md` 的 D-027。
+
 ## 开发状态
 
 | 阶段 | 内容 | 状态 |
@@ -51,8 +62,8 @@ $py = 'D:\anaconda3\envs\scisim-agent\python.exe'
 | M0 Phase0 | 仓库骨架、协议冻结、SDK spike | ✅ 完成 |
 | M1 | Bridge 骨架 + 配对认证 + WSS + 假/真 ASR + DSH SDK 接线 | ✅ 完成（114 tests） |
 | M2 | App 壳 + WebView UI + 文本聊天 + JsBridge 契约 | ✅ 代码完成（122 web tests + 4 个静态自检） |
-| M3 | 真录音 + 蓝牙路由 + PTT + partial/定稿 | ⏳ 代码完成，待真机按 runbook 验收 |
-| M4 | 审批/提问、重连、诊断、CI 出 APK | ✅ 代码与 CI 配置完成，待 GitHub 首次运行 |
+| M3 | 真录音 + 蓝牙路由 + PTT + partial/定稿 | ⏳ APK 已构建（53 单测绿），待真机按 runbook 验收 |
+| M4 | 审批/提问、重连、诊断、CI 出 APK | ✅ 代码与 CI 配置完成；APK 已改由本机构建；GitHub Actions 被账号 billing lock 阻塞（D-026） |
 
 ## 验证命令（提交前）
 
@@ -65,6 +76,7 @@ cd app\web; node --test --test-isolation=none "tests/*.test.js"; cd ..   # 122 p
 foreach ($s in 'verify_protocol','check_contract','check_kotlin_static','check_gradle_config') {
   & $py "app\android\tools\$s.py" }                         # 全 OK
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File ci\run_tests.ps1 -AllowMissing
+# Android 构建 / 单测：见 app\android\BUILD-LOCAL.md（本机 53 单测绿、APK 3.87 MB）
 ```
 
 ## 开发约定

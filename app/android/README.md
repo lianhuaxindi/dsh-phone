@@ -35,8 +35,24 @@ themes in `res/values[-night]`.
 
 ## Building
 
-This machine has no JDK/Android SDK; builds happen on CI
-(`.github/workflows/ci.yml`, ubuntu + Temurin JDK 17 + Android SDK).
+Two paths exist; both produce the same APK.
+
+**Local (works on this machine, already used to produce `app-debug.apk`):** the
+repo carries a self-contained toolchain under `.tools/android/` (gitignored JDK 17
++ Android SDK 35 + Gradle 8.9). Full recipe, timings and troubleshooting:
+**[BUILD-LOCAL.md](BUILD-LOCAL.md)** (D-027). Short version:
+
+```powershell
+$t = '<repo>\.tools\android'
+$env:JAVA_HOME = "$t\jdk"; $env:ANDROID_HOME = "$t\sdk"; $env:ANDROID_SDK_ROOT = "$t\sdk"
+& "$t\gradle-8.9\bin\gradle.bat" -p app\android assembleDebug --no-daemon --console=plain `
+  -Pdsphone.versionName=1.0.0 -Pdsphone.versionCode=10000
+# → app\android\app\build\outputs\apk\debug\app-debug.apk
+```
+
+**CI (`.github/workflows/ci.yml`, ubuntu + Temurin JDK 17 + Android SDK):** note
+that GitHub Actions is currently blocked by an account-level billing lock
+(D-026), so CI cannot run until the account's Billing page is fixed.
 
 CI must provision these SDK components:
 
@@ -160,12 +176,14 @@ and checks the frozen vectors without any Android toolchain
   file, export capped at 48 KiB from the tail, and every line passes
   `Redactor` (tokens, HMACs, nonces, pairing codes, text/audio bodies masked).
 
-## Not verified locally (compile/device risk)
+## Not verified on a device (runtime risk)
 
-No JDK, Android SDK, adb or device on this workstation, so **none of the Kotlin
-compiles here**. Verification performed instead: JVM unit-test sources written
-against the frozen vectors, Python cross-check of the pure logic, and manual
-review against `docs/PROTOCOL.md`.
+The module now **compiles and packages locally** (D-027): `assembleDebug` succeeded
+(54s), `app-debug.apk` is 3,867,632 B (`com.dsh.phone` 1.0.0/10000, minSdk 29 /
+targetSdk 35), and all 8 JVM test classes / 53 tests pass (see BUILD-LOCAL.md §7
+for the two ways to run them when the sandbox blocks Gradle's forked test worker).
+What is still unverified is **device behaviour** — nothing below has run on real
+hardware yet, and no `adb` exists on this workstation.
 
 Highest-risk items, in order:
 
@@ -462,12 +480,12 @@ at this section.
       above; G3/G4 reproduced (or not) and the D-024 acceptance re-confirmed
       by the Lead.
 
-## Local self-check without a build (no JDK / Android SDK)
+## Deterministic self-checks (no build required — run before pushing)
 
-This module was authored on a machine without a JDK, Gradle or the Android SDK
-(D-006), so `./gradlew assembleDebug` can only run in CI. Four deterministic
-Python checks (`tools/`, standard library only, no network) close most of the
-gap; run them all before pushing:
+A local build is possible now (BUILD-LOCAL.md / D-027), but these four Python
+checks (`tools/`, standard library only, no network) stay as the fast gate: they
+catch contract/constant drift that a successful compile would not. Run them all
+before pushing:
 
 ```powershell
 # 1. Protocol constants + test vectors (PROTOCOL v1 sections 5-8, 11)

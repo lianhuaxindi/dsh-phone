@@ -34,9 +34,9 @@ Checks
     `dsphone.versionCode` system properties (ci-build passes them with -P).
 8.  Repo hygiene: no local.properties / keystore / *.apk / wrapper jar / web
     asset copies (these are local or CI-generated and must not be committed).
-9.  Wrapper/Gradle: distributionUrl 8.9-bin.zip, no custom buildToolsVersion
-    that UI/CI does not install, `assets/web/index.html` present locally (WARN
-    only: CI syncs it before building).
+9.  Wrapper/Gradle: distributionUrl 8.9-bin.zip; an explicit buildToolsVersion
+    is accepted when it matches compileSdk (otherwise WARN); `assets/web/index.html`
+    present locally (WARN only: CI syncs it before building).
 
 Exit code: 0 = consistent, 1 = contradiction found.  Static check only, no
 build is performed.
@@ -346,8 +346,23 @@ def check_wrapper_and_settings(wrapper_text: str, settings: str, app_text: str) 
     expect("include(\":app\")" in settings, "settings includes :app", "settings.gradle.kts does not include(\":app\")")
     expect("FAIL_ON_PROJECT_REPOS" in settings, "dependencyResolutionManagement FAIL_ON_PROJECT_REPOS", "settings.gradle.kts: repository mode not pinned")
     expect("google()" in settings and "mavenCentral()" in settings, "google() + mavenCentral() repositories", "settings.gradle.kts: google()/mavenCentral() missing")
-    if re.search(r"buildToolsVersion\s*=", app_text):
-        warn("explicit buildToolsVersion found (CI installs build-tools;35.0.0; prefer letting AGP choose)")
+    explicit = re.search(r"buildToolsVersion\s*=\s*\"([0-9]+(?:\.[0-9]+){1,2})\"", app_text)
+    compile_sdk = re.search(r"compileSdk\s*=\s*(\d+)", app_text)
+    if explicit:
+        version = explicit.group(1)
+        expected = f"{compile_sdk.group(1)}.0.0" if compile_sdk else None
+        if expected and version == expected:
+            ok(
+                f"explicit buildToolsVersion {version} matches compileSdk "
+                f"{compile_sdk.group(1)} (needed where AGP's default Build Tools are not installed)"
+            )
+        else:
+            warn(
+                f"explicit buildToolsVersion {version} does not match compileSdk"
+                f" {expected or '?'} — align it with the installed build-tools"
+            )
+    else:
+        ok("buildToolsVersion left to the AGP default")
 
 
 def main() -> int:

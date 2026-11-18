@@ -197,7 +197,18 @@
   2. 未解锁前，CI 的唯一执行路径是本地 `ci\run_tests.ps1`（已全绿）；`.github/workflows/ci.yml` 保留，额度恢复即可用。
   3. token 不落仓库；推送用临时 tokenized remote URL，推送后立即 `set-url` 复原（沙箱内 credential helper 会因 `sh.exe` 建管道被拒而失败）。
 - 用户待办：① 处理 Billing 锁定；② 手动删除诊断用一次性仓库 `dsh-phone-ci-probe`（私有）与 `dsh-phone-ci-probe-pub`（公开；当前 token 无 `delete_repo` scope，API 删不掉）；③ 解锁后确认 4 个 job + APK 产物；④ 收尾建议 revoke 当前 PAT。
-- 影响：APK 仍无法产出（本机无 JDK/SDK 是 D-006，GitHub 端又被 lock 阻塞）；真机验收（M3）与真模型联调（需 apiKey）仍待用户参与。
+- 影响：CI 暂时无法产出 APK；**本机已改走自建工具链出包并成功**（D-027），不再阻塞 M3；真机验收（M3）与真模型联调（需 apiKey）仍待用户参与。
 
+## D-027 本机自建 Android 构建链（JDK17 + SDK + Gradle）并成功出 APK（2026-11-18）
 
-
+- 状态：已定 / 已交付（task-9 由 android-shell 执行，Lead 独立验收并复跑构建与单测）。
+- 背景：D-006 的假设是「本机无 JDK/SDK ⇒ APK 只能靠 CI」，而 D-026 又把 CI 堵住了；为了不把 M3 真机验收卡死，改为在工作区内自建工具链出包。
+- 安装位置（全部在 `.tools/` 下且已被 `.gitignore` 排除，不进仓库）：`.tools/android/{jdk, sdk, gradle-8.9, gradle-home, downloads, logs}`；JDK 17（Temurin）、cmdline-tools 11076708、`platform-tools` + `platforms;android-35` + `build-tools;35.0.0`、Gradle 8.9。所有下载用 Python（curl / .NET / Invoke-WebRequest 的 TLS 在本机是坏的，见 D-026 旁证）。
+- 三处必要的仓库改动（否则干净机器或中文路径上必失败）：
+  1. `app/android/app/build.gradle.kts` 显式 `buildToolsVersion = "35.0.0"`：AGP 8.7.x 默认要 34.0.0，而 SDK 只装 35.0.0 → `Failed to find Build Tools revision 34.0.0`。
+  2. `app/android/gradle.properties` 加 `android.overridePathCheck=true`：工作区路径含中文（`D:\code\apps\手机端`），AGP 默认直接拒绝构建（CI 的英文路径不受影响）。
+  3. `app/android/app/src/main/java/com/dsh/phone/net/WssClient.kt`：子协议回显校验从 `onResponse` 移到 `onOpen`，不匹配分支显式 `return`（原实现校验时机不对，真实握手路径上会漏校验）。
+- 沙箱限制与替代：`gradle testDebugUnitTest` 的 fork 测试 worker 需要子进程管道，被 DSH 沙箱拒绝（`ClassNotFoundException: worker.org.gradle.process.internal.worker.GradleWorkerMain` + `管道正在被关闭`）⇒ ① 直连 JUnit4 跑已编译测试类（`OK (53 tests)`，0.3s）；② 把仓库复制到纯 ASCII 临时目录跑官方任务（JUnit XML：8 套件 / 53 tests / 0 failures / 45s）。GitHub runner 不受此限制，CI 仍用 `./gradlew testDebugUnitTest`。
+- 实测：首次 `BUILD SUCCESSFUL in 54s`、增量 21s（35 tasks up-to-date）；产物 `app/android/app/build/outputs/apk/debug/app-debug.apk` = 3,867,632 B、SHA256 `72C34DBA629475D421B517FD8976942DAC764A91985111DAC0FDA97E718CA408`、badging `com.dsh.phone` versionCode 10000 / versionName 1.0.0 / minSdk 29 / targetSdk 35、内含 26 个 `assets/web/*`、9 个 dex、49 entries。
+- 文档：`app/android/BUILD-LOCAL.md`（12 章：工具链版本与安装、每 shell 环境变量、可复制构建命令、实测数据、APK 校验、单测三条路径、非 ASCII 路径、已知 warning、CI 参考、故障排查表、改动文件）。
+- 影响：M3 真机验收不再被 CI 阻塞；CI 解锁后仍作为「干净机器可复现 + 回归」使用。

@@ -404,10 +404,11 @@ class WssClient(
         /**
          * OkHttp does not negotiate subprotocols by itself: the request header is
          * set manually in [buildRequest], and the server echo has to be validated
-         * here. A mismatch means the server is not speaking `dsphone.v1`, so the
-         * socket is closed and the client fails instead of sending v1 frames.
+         * here (the handshake response is exposed by [onOpen]). A mismatch means
+         * the server is not speaking `dsphone.v1`, so the socket is closed and the
+         * client fails instead of sending v1 frames.
          */
-        override fun onResponse(webSocket: WebSocket, response: Response) {
+        override fun onOpen(webSocket: WebSocket, response: Response) {
             val agreed = response.header("Sec-WebSocket-Protocol")
             if (agreed != Protocol.SUBPROTOCOL) {
                 LogStore.warn("ws.subprotocol_mismatch", "agreed" to (agreed ?: "none"))
@@ -428,10 +429,8 @@ class WssClient(
                         setState(State.FAILED)
                     }
                 }
+                return
             }
-        }
-
-        override fun onOpen(webSocket: WebSocket, response: Response) {
             synchronized(lock) { onSocketOpenLocked(gen, webSocket) }
         }
 

@@ -10,6 +10,10 @@ val dsphoneVersionCode: Int = ((findProperty("dsphone.versionCode") as String?) 
 android {
     namespace = "com.dsh.phone"
     compileSdk = 35
+    // 显式钉住 Build Tools：AGP 8.7.x 的默认修订号是 34.0.0，而本仓库基线只安装
+    // build-tools;35.0.0（本机 .tools 与 CI sdkmanager 步骤一致）。不钉住会在没有
+    // 34.0.0 的干净机器上以 "Failed to find Build Tools revision 34.0.0" 失败。
+    buildToolsVersion = "35.0.0"
 
     defaultConfig {
         applicationId = "com.dsh.phone"

@@ -7,16 +7,16 @@
 ## 1. 当前状态（一句话版）
 
 **电脑端 Bridge 已完整可跑**（WSS + 配对认证 + 协议 + 真 ASR + DSH SDK 接线，114 个测试绿）；
-**手机端代码完整**（Kotlin 壳 + WebView UI，静态自检全绿），但**还没有在真机上构建和跑过**；
-**CI 流水线已写好**，但**还没有在 GitHub 上跑过第一次**。
+**手机端代码完整**（Kotlin 壳 + WebView UI），**debug APK 已在本机构建成功**（`com.dsh.phone` 1.0.0，3,867,632 B，见 §3.2），但**还没有在真机上跑过**；
+**CI 流水线已写好**，但 **GitHub Actions 被账号 billing lock 阻塞**（D-026），首次 CI 至今未跑。
 
 | 里程碑 | 内容 | 状态 | 证据 |
 |---|---|---|---|
-| M0 Phase0 | 仓库骨架、协议冻结（`PROTOCOL.md` v1）、SDK spike | ✅ 完成 | `docs/spike/SDK-SPIKE.md`、D-001…D-025 |
+| M0 Phase0 | 仓库骨架、协议冻结（`PROTOCOL.md` v1）、SDK spike | ✅ 完成 | `docs/spike/SDK-SPIKE.md`、D-001…D-027 |
 | M1 Bridge | WSS + 配对 + 认证 + 协议 + 音频帧 + 假/真 ASR + 假/真 DSH | ✅ 完成 | `pytest bridge\tests` → 114 passed；`python -m bridge --self-test` → 5 PASS |
-| M2 App+UI | Kotlin 壳、WebView UI、JsBridge 契约、mock 演示 | ✅ 代码完成、单测/静态验收 | web 122 tests 绿；`app/android/tools/*.py` 4 个脚本全 OK |
-| M3 录音+蓝牙 | AudioRecord / PTT / SCO/HFP / 前台服务 | ⏳ 代码完成，**待真机验收** | `app/android/README.md` 的 M3 runbook（约 30 条可勾选场景） |
-| M4 审批/诊断/CI | 审批/提问弹窗、诊断页、重连、GitHub Actions 出 APK | ✅ 代码与配置完成，**CI 待首次运行** | `.github/workflows/ci.yml`、`ci/` |
+| M2 App+UI | Kotlin 壳、WebView UI、JsBridge 契约、mock 演示 | ✅ 代码完成、单测/静态验收、**已出 APK** | web 122 tests 绿；`app/android/tools/*.py` 4 个脚本全 OK；APK 见 §3.2 |
+| M3 录音+蓝牙 | AudioRecord / PTT / SCO/HFP / 前台服务 | ⏳ **APK 已构建、待真机验收** | `app-debug.apk`（3.87 MB，D-027）+ `app/android/README.md` 的 M3 runbook（约 30 条可勾选场景） |
+| M4 审批/诊断/CI | 审批/提问弹窗、诊断页、重连、GitHub Actions 出 APK | ✅ 代码与配置完成；CI 被 billing lock 阻塞（D-026），**APK 已改由本机构建**（D-027） | `.github/workflows/ci.yml`、`ci/`、`app/android/BUILD-LOCAL.md` |
 
 ## 2. 电脑端：马上能跑
 
@@ -105,12 +105,29 @@ python -m http.server 8123
 `?transport=mock` 是完整交互演示（会话/流式回复/工具状态/审批/提问/录音浮层），数据在内存与 IndexedDB。
 `?transport=ws` 才会连真实 Bridge（需要浏览器信任自签证书，V1 不推荐）；`native` 只在 App 里有效。
 
-### 3.2 出 APK（本机没有 JDK/Android SDK）
+### 3.2 出 APK（本机已装好工具链，一条命令出包）
 
-- 本机**无法**构建 APK（D-006）→ 走 GitHub Actions（仓库已推送：<https://github.com/lianhuaxindi/dsh-phone>）：
-  1. 仓库 `main` 已就绪（HEAD `fecc151`），`.github/workflows/ci.yml` 已通过 `actionlint`；
-  2. `android-build` job 会：同步 Web 资源 → 4 个离线自检 → 生成 gradle wrapper → `assembleDebug` → `testDebugUnitTest` → 上传 `app-debug-<versionName>-<versionCode>` 产物（保留 14 天）。
-- 首次 CI 最可能红的三处（按概率）：Kotlin 编译/R8 → OkHttp 自签 pinning → `sync_web.sh` 的 bash 实现（本机无法执行 bash 版）。
+**APK 已经在本机构建成功**（2026-11-18）：`app/android/app/build/outputs/apk/debug/app-debug.apk`
+→ 3,867,632 B，`package com.dsh.phone`、`versionCode 10000` / `versionName 1.0.0`、minSdk 29 / targetSdk 35、内含 26 个 `assets/web/*` 资源。
+
+本机工具链（无需系统安装、全部在工作区 `.tools/` 下，已 gitignore）：JDK 17 + Android cmdline-tools（`platform-tools` / `platforms;android-35` / `build-tools;35.0.0`）+ Gradle 8.9。首次安装与可复制命令见 **`app/android/BUILD-LOCAL.md`**（12 章，含环境变量、单测替代跑法、非 ASCII 路径开关、故障排查表）。
+
+日常重新出包（PowerShell）：
+
+```powershell
+$t = 'D:\code\apps\手机端\.tools\android'
+$env:JAVA_HOME = "$t\jdk"; $env:ANDROID_HOME = "$t\sdk"; $env:ANDROID_SDK_ROOT = "$t\sdk"
+$env:PATH = "$t\jdk\bin;$t\sdk\platform-tools;$env:PATH"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\sync_web.ps1      # Web UI → assets
+& "$t\gradle-8.9\bin\gradle.bat" -p app\android assembleDebug --no-daemon --console=plain `
+  -Pdsphone.versionName=1.0.0 -Pdsphone.versionCode=10000
+# 产物：app\android\app\build\outputs\apk\debug\app-debug.apk
+```
+
+- 实测：首次 `BUILD SUCCESSFUL in 54s`，增量 21s。
+- 本机单测：Gradle 的 fork 测试 worker 被 DSH 沙箱禁管道拦住 → 用 `BUILD-LOCAL.md` §7.2 的直连 JUnit4 命令（**53 tests OK**），或 §7.3 的 ASCII 临时副本跑官方 `testDebugUnitTest`（JUnit XML 8 套件 / 53 tests / 0 failures）。
+- 装到手机：本机没有 `adb`，把 `app-debug.apk` 传到手机安装即可（debug 签名，需允许「安装未知来源」）。
+- 备选路径（CI）：仓库 `main` 已推送 <https://github.com/lianhuaxindi/dsh-phone>，`.github/workflows/ci.yml` 已通过 `actionlint`；`android-build` job 会 sync Web 资源 → 4 个离线自检 → gradle wrapper → `assembleDebug` → `testDebugUnitTest` → 上传 `app-debug-<versionName>-<versionCode>`。但**目前被账号 billing lock 阻塞**（见 §3.3 / D-026）。
 
 ### 3.3 GitHub 仓库与 CI 现状（2026-11-18）
 
@@ -120,6 +137,7 @@ python -m http.server 8123
   ⇒ **账号级 billing lock**（详见 D-026）。`actionlint` 已通过；最小 smoke workflow 同样被拦；同账号公开/私有一次性仓库 A/B 结果一致。
 - 解锁步骤：GitHub `Settings → Billing` 处理支付方式/欠费/账单横幅 → 打开仓库 `Actions → DSH Phone CI → Run workflow` 重跑；成功后 `android-build` 产物即 APK。
 - 未解锁期间的替代验证：`ci\run_tests.ps1 -AllowMissing`（bridge 114 / web 122 / 4 个 Android 静态自检 / sync；APK 跳过）。
+- **APK 不再依赖 CI**：本机工具链已就绪并已出包（§3.2 / D-027），CI 只是「换机器可复现 + 回归」的加速器。
 - 诊断残留待清理：一次性仓库 `dsh-phone-ci-probe`（私有）与 `dsh-phone-ci-probe-pub`（公开）需手动删除（当前 token 无 `delete_repo` scope）。
 
 ## 4. 已验证 / 未验证（诚实清单）
@@ -135,9 +153,11 @@ python -m http.server 8123
 | **端到端（模拟手机）** | `scripts\e2e_phone_sim.py --asr fake` / `--asr sherpa` | **21 checks / 22 checks PASS，exit 0**（见 §2.4） |
 | ASR 基准 | `scripts\bench_asr.py --backend sherpa` | NFR PASS |
 | Web 单测 | `cd app\web; node --test --test-isolation=none "tests/*.test.js"` | 122 tests 全绿 |
-| Android 静态 | `app\android\tools\{verify_protocol,check_contract,check_kotlin_static,check_gradle_config}.py` | 69 / 16+16 / 20 files / 63 checks 全 OK |
+| **Android 构建（本机）** | `.tools` 工具链 + `gradle assembleDebug`（见 `app/android/BUILD-LOCAL.md`） | **BUILD SUCCESSFUL**，`app-debug.apk` 3,867,632 B，SHA256 `72C34DBA…718CA408`，badging `com.dsh.phone` 1.0.0 / 10000 |
+| **Android 单测** | 直连 JUnit4（`BUILD-LOCAL.md` §7.2）／ASCII 副本 `testDebugUnitTest`（§7.3） | **53 tests / 0 failures**（8 个测试类） |
+| Android 静态 | `app\android\tools\{verify_protocol,check_contract,check_kotlin_static,check_gradle_config}.py` | 69 / 16+16 / 20 files / 64 checks 全 OK |
 | CI 配置 | `python ci/check_workflow.py --strict` + pyyaml 解析 | exit 0 / 4 jobs |
-| 本地 CI 复现 | `ci\run_tests.ps1 -AllowMissing` | exit 0（仅 APK 因无 SDK 跳过） |
+| 本地 CI 复现 | `ci\run_tests.ps1 -AllowMissing` | exit 0（仅 APK 因无 SDK 跳过；APK 已由本机构建补上） |
 
 **未验证（需要你 / 需要环境）**
 
@@ -156,10 +176,13 @@ python -m http.server 8123
 | 沙箱内 `node --test` 全量跑 | `Error: spawn EPERM` | 用 `node --test --test-isolation=none "tests/*.test.js"`；ubuntu CI 不受影响 |
 | Windows 控制台 GBK | Bridge 启动时 `UnicodeEncodeError` 崩 | 已修：二维码自动降级 ASCII、banner 用 ASCII 边框 |
 | 工作区有 24 个删不掉的临时目录 | `pytest-cache-files-*` / `.tmp` / `.pip-tmp`（DSH deny ACE） | 已 gitignore，不影响仓库；无需强行清理 |
+| 沙箱禁止子进程管道 → Gradle 测试 worker 起不来 | `testDebugUnitTest` 报 `ClassNotFoundException: GradleWorkerMain` / `管道正在被关闭` | 用 `BUILD-LOCAL.md` §7.2 直连 JUnit4，或 §7.3 在 ASCII 临时副本里跑官方任务 |
+| 工程路径含中文（`D:\code\apps\手机端`） | AGP 直接拒绝：「Your project path contains non-ASCII characters」；`aapt2` 日志里路径变乱码 | `app/android/gradle.properties` 已设 `android.overridePathCheck=true`（CI 英文路径不受影响） |
+| 干净机器缺 Build Tools 34.0.0 | AGP 8.7.x 默认要 34.0.0，而 SDK 只装 35.0.0 → `Failed to find Build Tools revision 34.0.0` | `app/android/app/build.gradle.kts` 已显式钉 `buildToolsVersion = "35.0.0"`（D-027） |
 
 ## 6. 建议的下一步（按优先级）
 
-1. **真机验收（M3）**：装 debug APK → 照 `app/android/README.md` runbook 走 A/B/C/D/E 五组场景，把失败项记到 issue/README 的 gap 表。
+1. **真机验收（M3）**：把 `app/android/app/build/outputs/apk/debug/app-debug.apk`（3.87 MB，1.0.0）装到 Android 10+ 手机 → 照 `app/android/README.md` runbook 走 A/B/C/D/E 五组场景，把失败项记到 issue/README 的 gap 表。
 2. **CI 首跑**：先按 D-026 解除账号 billing lock；再在仓库 `Actions → DSH Phone CI → Run workflow` 重跑，先看 `bridge-tests` + `web-tests`，再看 `android-build`；红了先看 job 里失败 step 的日志（`Show build diagnostics on failure` 会打印 SDK 路径）。
 3. **真模型联调**：在 `bridge/config.toml` 配 `apiKey/provider/model` + `[dsh].enabled=true`，用 App 或 mock 之外的真连接发一轮 `chat.send`，确认 `assistant.delta`/`tool.status`/审批弹窗。
 4. **M3 两个已接受缺口**（D-024）：G3（LE Audio 失败不回退 HFP）、G4（`MicService.onDestroy` 不清录音态）——真机复现后修。
@@ -170,7 +193,7 @@ python -m http.server 8123
 ```
 docs/PROTOCOL.md            协议 v1（冻结；子协议 dsphone.v1）
 docs/ARCHITECTURE.md        三端架构、JsBridge 契约、配置样例
-docs/DECISIONS.md           D-001…D-026 全部决策与理由
+docs/DECISIONS.md           D-001…D-027 全部决策与理由
 docs/TESTPLAN.md            69 条用例 + PRD 39 个 FR 映射
 docs/SECURITY.md            STRIDE + 12 项安全设计 + 7 项安全测试
 docs/spike/SDK-SPIKE.md     SDK 0.2.2rc2 能力与限制（推翻了 PRD 的部分假设）
@@ -180,5 +203,6 @@ bridge/dsh_sdk.py           真 SDK 适配器（D-018…D-022）
 bridge/asr/sherpa.py        流式 zipformer + SenseVoice 定稿
 app/web/                    WebView UI（零依赖零构建；mock 可独立演示）
 app/android/README.md       Kotlin 工程说明 + 离线自检 + M3 真机 runbook
+app/android/BUILD-LOCAL.md  本机 JDK17+SDK 安装、出 APK、单测替代跑法（D-027）
 .github/workflows/ci.yml    4 个 job：bridge-tests / web-tests / android-build / secrets-scan
 ```
