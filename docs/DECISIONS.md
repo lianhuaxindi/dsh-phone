@@ -185,5 +185,19 @@
 - 理由：产品定位是「连用户电脑上已装的 DSH」，用户机器上的 runtime 版本不受我们控制；把版本号写死会制造无法满足的前置条件。同时保留 upgraded 提示，避免 silently 用错版本。
 - 影响：`bridge/RUNTIME.md` 记录版本偏斜与本机实测；CI 不涉及（fake）。
 
+## D-026 GitHub 仓库公开 + Actions 被账号级 billing lock 阻塞（2026-11-18）
+
+- 状态：已定（交付收尾）。
+- 现状：仓库 `https://github.com/lianhuaxindi/dsh-phone`，`main` HEAD=`fecc151`（本地工作区干净）。仓库按用户选择改为 **public**；`ci.yml` 已通过 `actionlint` v1.7.7（修掉一处真问题：job 级 `name:` 里用了 `${{ env.NODE_VERSION }}`，改为字面量）。
+- 故障现象：所有 run 都 `startup_failure`（私有期间 `path=BuildFailed`、0 job；改 public 后 job 会创建但立刻失败、steps 为空）。
+- **根因（决定性证据）**：job 级 check-run annotation 原文 —— `The job was not started because your account is locked due to a billing issue.` ⇒ 账号级 billing lock，与 workflow YAML / 仓库内容无关。
+- 已排除：① A/B 对照：同账号新建的一次性公开/私有仓库跑同一个 5 行 smoke workflow，同样被拦（annotation 一致），故与 `allowed_actions`、仓库可见性、工作流注册无关；② 关闭再开启仓库 Actions 权限（重建注册）无效；③ `actionlint` 已无告警。
+- 决定：
+  1. **公开仓库不能绕过 billing lock**，仍须用户在 GitHub `Settings → Billing`（支付方式/欠费/账单横幅）处理；处理完重跑 `workflow_dispatch` 即可。
+  2. 未解锁前，CI 的唯一执行路径是本地 `ci\run_tests.ps1`（已全绿）；`.github/workflows/ci.yml` 保留，额度恢复即可用。
+  3. token 不落仓库；推送用临时 tokenized remote URL，推送后立即 `set-url` 复原（沙箱内 credential helper 会因 `sh.exe` 建管道被拒而失败）。
+- 用户待办：① 处理 Billing 锁定；② 手动删除诊断用一次性仓库 `dsh-phone-ci-probe`（私有）与 `dsh-phone-ci-probe-pub`（公开；当前 token 无 `delete_repo` scope，API 删不掉）；③ 解锁后确认 4 个 job + APK 产物；④ 收尾建议 revoke 当前 PAT。
+- 影响：APK 仍无法产出（本机无 JDK/SDK 是 D-006，GitHub 端又被 lock 阻塞）；真机验收（M3）与真模型联调（需 apiKey）仍待用户参与。
+
 
 

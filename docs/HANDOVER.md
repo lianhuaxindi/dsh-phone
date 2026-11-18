@@ -107,10 +107,20 @@ python -m http.server 8123
 
 ### 3.2 出 APK（本机没有 JDK/Android SDK）
 
-- 本机**无法**构建 APK（D-006）→ 推到 GitHub 跑 CI：
-  1. 建仓库并 push（`.github/workflows/ci.yml` 已就绪）；
+- 本机**无法**构建 APK（D-006）→ 走 GitHub Actions（仓库已推送：<https://github.com/lianhuaxindi/dsh-phone>）：
+  1. 仓库 `main` 已就绪（HEAD `fecc151`），`.github/workflows/ci.yml` 已通过 `actionlint`；
   2. `android-build` job 会：同步 Web 资源 → 4 个离线自检 → 生成 gradle wrapper → `assembleDebug` → `testDebugUnitTest` → 上传 `app-debug-<versionName>-<versionCode>` 产物（保留 14 天）。
 - 首次 CI 最可能红的三处（按概率）：Kotlin 编译/R8 → OkHttp 自签 pinning → `sync_web.sh` 的 bash 实现（本机无法执行 bash 版）。
+
+### 3.3 GitHub 仓库与 CI 现状（2026-11-18）
+
+- 仓库：<https://github.com/lianhuaxindi/dsh-phone>（**public**，`main` HEAD `fecc151`）。
+- **CI 现在跑不了，但原因不在代码**：所有 job 的 check-run annotation 是
+  `The job was not started because your account is locked due to a billing issue.`
+  ⇒ **账号级 billing lock**（详见 D-026）。`actionlint` 已通过；最小 smoke workflow 同样被拦；同账号公开/私有一次性仓库 A/B 结果一致。
+- 解锁步骤：GitHub `Settings → Billing` 处理支付方式/欠费/账单横幅 → 打开仓库 `Actions → DSH Phone CI → Run workflow` 重跑；成功后 `android-build` 产物即 APK。
+- 未解锁期间的替代验证：`ci\run_tests.ps1 -AllowMissing`（bridge 114 / web 122 / 4 个 Android 静态自检 / sync；APK 跳过）。
+- 诊断残留待清理：一次性仓库 `dsh-phone-ci-probe`（私有）与 `dsh-phone-ci-probe-pub`（公开）需手动删除（当前 token 无 `delete_repo` scope）。
 
 ## 4. 已验证 / 未验证（诚实清单）
 
@@ -132,7 +142,7 @@ python -m http.server 8123
 **未验证（需要你 / 需要环境）**
 
 1. **真机**：录音、蓝牙路由、前台服务、Keystore、WebView `appassets.local` —— 按 `app/android/README.md` 的 M3 runbook 逐条验收。
-2. **GitHub CI 首跑**：Kotlin 编译、APK 产物、JUnit 在 JDK17 上跑、bash 版 `sync_web.sh`。
+2. **GitHub CI 首跑**：Kotlin 编译、APK 产物、JUnit 在 JDK17 上跑、bash 版 `sync_web.sh`。（当前被账号 billing lock 阻塞，见 D-026 / §3.3）
 3. **真实模型调用**：Bridge 侧 SDK 接线只验证到 `start/initialize/start_session/close`；`session/prompt` 真调用需要你配 `apiKey` 后自测（注意 D-025 的 runtime 版本偏斜：本机 installed 是 `0.2.2-rc.1`，SDK 是 `0.2.2rc2`）。
 
 ## 5. 沙箱/本机已知坑（踩过就记下来）
@@ -150,7 +160,7 @@ python -m http.server 8123
 ## 6. 建议的下一步（按优先级）
 
 1. **真机验收（M3）**：装 debug APK → 照 `app/android/README.md` runbook 走 A/B/C/D/E 五组场景，把失败项记到 issue/README 的 gap 表。
-2. **CI 首跑**：push 到 GitHub，先看 `bridge-tests` + `web-tests`，再看 `android-build`；红了先看 job 里失败 step 的日志（`Show build diagnostics on failure` 会打印 SDK 路径）。
+2. **CI 首跑**：先按 D-026 解除账号 billing lock；再在仓库 `Actions → DSH Phone CI → Run workflow` 重跑，先看 `bridge-tests` + `web-tests`，再看 `android-build`；红了先看 job 里失败 step 的日志（`Show build diagnostics on failure` 会打印 SDK 路径）。
 3. **真模型联调**：在 `bridge/config.toml` 配 `apiKey/provider/model` + `[dsh].enabled=true`，用 App 或 mock 之外的真连接发一轮 `chat.send`，确认 `assistant.delta`/`tool.status`/审批弹窗。
 4. **M3 两个已接受缺口**（D-024）：G3（LE Audio 失败不回退 HFP）、G4（`MicService.onDestroy` 不清录音态）——真机复现后修。
 5. **性能余量**（R-09）：首字 969–1000ms 贴着 NFR 1000ms；V1.1 可换更小 chunk / 更轻模型。
@@ -160,7 +170,7 @@ python -m http.server 8123
 ```
 docs/PROTOCOL.md            协议 v1（冻结；子协议 dsphone.v1）
 docs/ARCHITECTURE.md        三端架构、JsBridge 契约、配置样例
-docs/DECISIONS.md           D-001…D-025 全部决策与理由
+docs/DECISIONS.md           D-001…D-026 全部决策与理由
 docs/TESTPLAN.md            69 条用例 + PRD 39 个 FR 映射
 docs/SECURITY.md            STRIDE + 12 项安全设计 + 7 项安全测试
 docs/spike/SDK-SPIKE.md     SDK 0.2.2rc2 能力与限制（推翻了 PRD 的部分假设）

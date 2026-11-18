@@ -9,7 +9,8 @@
 > 详细需求见 [docs/PRD.md](docs/PRD.md)；协议见 [docs/PROTOCOL.md](docs/PROTOCOL.md)；架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)；
 > **交付/验收/已知坑见 [docs/HANDOVER.md](docs/HANDOVER.md)**；决策见 [docs/DECISIONS.md](docs/DECISIONS.md)。
 >
-> 仓库（私有）：<https://github.com/lianhuaxindi/dsh-phone> · CI：[`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+> 仓库（公开）：<https://github.com/lianhuaxindi/dsh-phone> · CI：[`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+> （**GitHub Actions 目前被账号 billing lock 阻塞，见 [D-026](docs/DECISIONS.md)；本地用 `ci/run_tests.ps1` 验收**）
 
 ## 目录结构
 
