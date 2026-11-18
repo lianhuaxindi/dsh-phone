@@ -104,7 +104,7 @@ jobs:
 
   # ================================================================ Web UI 测试
   web-tests:
-    name: web-tests (node ${{ env.NODE_VERSION }})
+    name: web-tests (node 20)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
