@@ -286,3 +286,23 @@
 - 决定：子协议仍为 `dsphone.v1`（不改名，避免两端握手改动）；本轮新增字段全部可选（`hosts`/`name`/`images`/`session.meta`/`usage`/`media.get|data`/`scanPairing.result`），旧客户端遇到未知字段应忽略，故按 **v1.1 增量**记录在 PROTOCOL §5.1/§8.1/§9 与 §16。
 - App 版本：`versionName=1.1.0`、`versionCode=10100`（`ci/version.json` 与 `app/android` 默认值同步）。
 - 理由：新老 APK 对旧 Bridge 仍能连（只是无图片/用量能力）；避免一次协议大版本升级带来的双端联调成本。
+
+## D-034 `net.state` 多地址全败口径：统一 `state:"error"` + `tried[]`（2026-11-18）
+
+- 状态：已定。
+- 现象：android-shell 实现「`hosts` 多地址全部连不上」时上报 `net.state{state:"failed",reason:"all_addresses_failed",tried:[…]}`，而 ARCHITECTURE/PROTOCOL 冻结的枚举是 `idle|connecting|online|closed|error`。它的理由是现有 Web `transport.js` 把未知 state 落到 CLOSED，用 `failed` 不至于把「已断开」误判成其它状态。
+- 决定：**统一用 `state:"error"`**，可带可选 `{reason, message?, tried?:[{host,port,elapsedMs,error}]}`；不新增 `failed`。Android 侧把 `failed` 改回 `error`；Web 把 `error`（以及任何未知 state）都渲染为「已断开」，并把 `tried` 显示在诊断页。
+- 理由：① 状态机枚举越少越稳，UI 只是提示文案，不值得为它加一个状态分支；② `reason`/`tried` 是可选附加字段，旧客户端忽略也安全（v1.1 向后兼容原则）；③ 诊断信息（试过哪些地址、各自耗时/错误）本来就该在诊断页，而不是靠新状态名。
+- 影响：`docs/ARCHITECTURE.md` §3.2.1 已补枚举与 `error` 形状；Android `WssClient`/`AppCore` 改 `error`；Web `transport.js` 映射 `error→CLOSED` 并保留 `tried`。
+
+## D-035 局域网地址检测：只认 `IPv4 地址` 标签行 + 必须可 bind（2026-11-18）
+
+- 状态：已修（Lead 热修）。
+- 现象：用户双击 `scripts\start_bridge.cmd` 后控制台打出「Bridge 以退出码 1 结束」，`bridge/state/logs/bridge.log` 末尾无 `server.started`，stderr 为 `RuntimeError: 无法监听 10.15.0.1:8765: could not bind on any address out of [('10.15.0.1', 8765)]`；生成了 `config.local.toml` 且 `[server] host = "10.15.0.1"`。
+- 根因：`ipconfig` 的「默认网关」在长 IPv6 场景会折行，网关 IPv4（`10.15.0.1`）**单独占一行且只有缩进**；旧 `bridge/netinfo._from_ipconfig()` 把适配器块内**任意一行**里的 IPv4 都当网卡地址 → 网关被当成 WLAN 地址 → 排序时（同为 WLAN，按 IP 升序）排在真实地址 `10.15.187.127` 前 → 被写成 `host`。机器上确实存在两行：`10.15.0.1`（网关）与 `10.15.187.127`（网卡）；后者 `socket.bind` 成功，前者 `WinError 10049`。
+- 修复（`bridge/netinfo.py`）：
+  1. 只解析带 **IPv4 标签**的行（英文 `IPv4 Address`、中文 `IPv4 地址`，正则 `ipv4[^:]*:`），网关/掩码/DNS 行不再参与；
+  2. 新增 `is_bindable_ipv4()`（`socket.bind((ip,0))` 探测），`collect_candidates()` 丢弃 bind 不了的地址 —— 双保险，跨机器也防「看似私网但不是本机地址」；
+  3. `scripts/bridge_lan.py` 复用同一实现，无需改。
+- 验证：`scripts\bridge_lan.py --json` → `{"best":"10.15.187.127",…}`；`scripts\start_bridge.ps1` 端到端 → banner `监听 10.15.187.127:8765`、配对码 959766、`二维码图片 …\bridge\state\qr.png`、`server.started`，`-Stop` 正常退出并释放端口；新增 `bridge/tests/test_netinfo.py`（8 例：英文/中文标签、折行网关、掩码、`is_bindable`、候选过滤、`pairing_hosts` 不混入不可 bind 地址），全量 `pytest bridge\tests` → **154 passed**。
+- 教训：从 `ipconfig` 文本里抓 IP 不能「整块正则扫」，必须认标签；凡是「拿来自动填配置」的地址，落盘前先做一次 bind 探测（代价 1ms，省一次启动失败）。

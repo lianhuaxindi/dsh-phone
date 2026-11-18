@@ -48,6 +48,8 @@ WIRELESS_HINTS = ("wlan", "wi-fi", "wifi", "无线", "wlp")
 ETHERNET_HINTS = ("ethernet", "以太网", "eth", "enp", "本地连接")
 
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+#: ipconfig 里「IPv4 地址」标签（英文 ``IPv4 Address`` / 中文 ``IPv4 地址`` 都匹配）。
+_IPV4_LABEL_RE = re.compile(r"ipv4[^:]*:", re.IGNORECASE)
 
 #: RFC 1918 私网段。注意：``ipaddress.IPv4Address.is_private`` 在 Python 3.11
 #: 里还把 240/4（含 255.255.0.0 这类子网掩码）算作 private，不能直接用。
@@ -81,8 +83,34 @@ def _decode(raw: bytes) -> str:
     return raw.decode("latin-1", errors="replace")
 
 
+def is_bindable_ipv4(value: str) -> bool:
+    """本机是否真的能 bind 到该 IPv4（排除默认网关/子网掩码等「看起来像地址」的值）。
+
+    D-035：ipconfig 的“默认网关”折行后孤立成一行（如 ``10.15.0.1``）时，旧解析会把它
+    当成网卡地址，导致 Bridge 启动报 ``无法监听 10.15.0.1:8765: could not bind``。
+    """
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    except OSError:  # pragma: no cover - 环境差异
+        return False
+    try:
+        sock.bind((value, 0))
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            sock.close()
+        except OSError:  # pragma: no cover - 环境差异
+            pass
+
+
 def _from_ipconfig() -> list[tuple[str, str]]:
-    """解析 ``ipconfig`` 输出 → [(适配器名, IPv4)]（Windows）。"""
+    """解析 ``ipconfig`` 输出 → [(适配器名, IPv4)]（Windows）。
+
+    只认「IPv4 地址」标签行（D-035）：适配器块里其它行（子网掩码、默认网关、DNS）
+    可能含数字，网关折行甚至会单独占一行，不能当成网卡地址。
+    """
     if sys.platform != "win32":
         return []
     try:
@@ -101,9 +129,13 @@ def _from_ipconfig() -> list[tuple[str, str]]:
         if line and not line[0].isspace() and line.rstrip().endswith(":"):
             adapter = line.strip().rstrip(":").strip()
             continue
-        if adapter and _IPV4_RE.search(line):
-            for match in _IPV4_RE.findall(line):
-                results.append((adapter, match))
+        if not adapter:
+            continue
+        label = _IPV4_LABEL_RE.search(line)
+        if label is None:
+            continue
+        for match in _IPV4_RE.findall(line[label.end():]):
+            results.append((adapter, match))
     return results
 
 
@@ -144,6 +176,9 @@ def collect_candidates() -> list[dict[str, object]]:
             continue
         score = _score(adapter)
         if score < 0:  # D-031：虚拟网卡/隧道不参与配对候选
+            continue
+        if not is_bindable_ipv4(address):  # D-035：默认网关/掩码等非本机地址
+            logger.debug("netinfo.skip_unbindable adapter=%s ip=%s", adapter, address)
             continue
         seen.add(address)
         ranked.append((score, adapter, address))
@@ -193,6 +228,7 @@ def computer_name() -> str:
 __all__: Iterable[str] = (
     "collect_private_ipv4",
     "computer_name",
+    "is_bindable_ipv4",
     "is_private_ipv4",
     "pairing_hosts",
 )

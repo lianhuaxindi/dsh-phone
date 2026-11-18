@@ -10,7 +10,7 @@
 **手机端代码完整**（Kotlin 壳 + WebView UI），**debug APK 已在本机构建成功**（`com.dsh.phone` **1.1.0 (10100)**，4,578,710 B，见 §3.2），但**还没有在真机上跑过**；
 **CI 流水线已写好**，但 **GitHub Actions 被账号 billing lock 阻塞**（D-026），首次 CI 至今未跑。
 
-**v1.1 新增（2026-11-18，D-028…D-034）**：① 手机端**真扫码配对**（Camera2 + ZXing，`ScanActivity`）；② **公共 Wi-Fi / 多地址**：配对 URI 带 `hosts=`，手机按 host→hosts 逐个 3 秒尝试并记忆上次成功地址；Bridge 同时输出 **`bridge/state/qr.png`**（手机扫图可用）；③ `[dsh]` **默认真模型**：provider=deepseek-official、model=deepseek-flash（DeepSeek-V4.1-Flash-1017，1M 上下文 / 最大输出 384K）、reasoningEffort=high、maxTokens=384000，**apiKey 留空由你填**（回退 `DEEPSEEK_API_KEY` / `DSH_PHONE_API_KEY`）；④ 手机端**上传照片/拍照**（`pickImage`，长边≤1600 / JPEG q80 / ≤2MiB×4、合计≤6MiB），图片随 `chat.send.images` 发给模型；⑤ UI 改成 **DeepSeek 官方手机端风格**（#4D6BFE、圆角气泡、会话抽屉、全屏聊天），顶部显示 **模型 / 思考强度 / 上下文占用**（`session.meta` + `assistant.done.usage`）。
+**v1.1 新增（2026-11-18，D-028…D-035）**：① 手机端**真扫码配对**（Camera2 + ZXing，`ScanActivity`）；② **公共 Wi-Fi / 多地址**：配对 URI 带 `hosts=`，手机按 host→hosts 逐个 3 秒尝试并记忆上次成功地址；Bridge 同时输出 **`bridge/state/qr.png`**（手机扫图可用）；③ `[dsh]` **默认真模型**：provider=deepseek-official、model=deepseek-flash（DeepSeek-V4.1-Flash-1017，1M 上下文 / 最大输出 384K）、reasoningEffort=high、maxTokens=384000，**apiKey 留空由你填**（回退 `DEEPSEEK_API_KEY` / `DSH_PHONE_API_KEY`）；④ 手机端**上传照片/拍照**（`pickImage`，长边≤1600 / JPEG q80 / ≤2MiB×4、合计≤6MiB），图片随 `chat.send.images` 发给模型；⑤ UI 改成 **DeepSeek 官方手机端风格**（#4D6BFE、圆角气泡、会话抽屉、全屏聊天），顶部显示 **模型 / 思考强度 / 上下文占用**（`session.meta` + `assistant.done.usage`）。
 
 | 里程碑 | 内容 | 状态 | 证据 |
 |---|---|---|---|
@@ -198,6 +198,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\sync_web.ps1    
 | 沙箱禁止子进程管道 → Gradle 测试 worker 起不来 | `testDebugUnitTest` 报 `ClassNotFoundException: GradleWorkerMain` / `管道正在被关闭` | 用 `BUILD-LOCAL.md` §7.2 直连 JUnit4，或 §7.3 在 ASCII 临时副本里跑官方任务 |
 | 工程路径含中文（`D:\code\apps\手机端`） | AGP 直接拒绝：「Your project path contains non-ASCII characters」；`aapt2` 日志里路径变乱码 | `app/android/gradle.properties` 已设 `android.overridePathCheck=true`（CI 英文路径不受影响） |
 | 干净机器缺 Build Tools 34.0.0 | AGP 8.7.x 默认要 34.0.0，而 SDK 只装 35.0.0 → `Failed to find Build Tools revision 34.0.0` | `app/android/app/build.gradle.kts` 已显式钉 `buildToolsVersion = "35.0.0"`（D-027） |
+| 双击启动脚本后「Bridge 以退出码 1 结束」 | 日志末尾 `无法监听 10.15.0.1:8765: could not bind`，`config.local.toml` 的 `host` 被写成默认网关 | 已修（D-035）：现在只认 `IPv4 地址` 标签行且必须能 bind；若仍不对，用 `scripts\start_bridge.ps1 -HostAddress <手机同网段的 WLAN IPv4>` 手动指定，或先跑 `python scripts\bridge_lan.py --json` 看候选 |
 
 ## 6. 建议的下一步（按优先级）
 
@@ -212,7 +213,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\sync_web.ps1    
 ```
 docs/PROTOCOL.md            协议 v1 + v1.1 增量（冻结；子协议 dsphone.v1）
 docs/ARCHITECTURE.md        三端架构、JsBridge 契约（17 ops）、配置样例
-docs/DECISIONS.md           D-001…D-034 全部决策与理由
+docs/DECISIONS.md           D-001…D-035 全部决策与理由
 docs/HANDOVER.md            本文件（状态/上手/已知坑/下一步）
 docs/TESTPLAN.md            69 条用例 + PRD 39 个 FR 映射
 docs/SECURITY.md            STRIDE + 12 项安全设计 + 7 项安全测试
