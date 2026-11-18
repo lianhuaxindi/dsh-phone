@@ -150,7 +150,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\sync_web.ps1    
 
 ### 3.3 GitHub 仓库与 CI 现状（2026-11-18）
 
-- 仓库：<https://github.com/lianhuaxindi/dsh-phone>（**public**，`main` HEAD `fecc151`）。
+- 仓库：<https://github.com/lianhuaxindi/dsh-phone>（**public**，`main` HEAD `caa32f4` = v1.1）。
 - **CI 现在跑不了，但原因不在代码**：所有 job 的 check-run annotation 是
   `The job was not started because your account is locked due to a billing issue.`
   ⇒ **账号级 billing lock**（详见 D-026）。`actionlint` 已通过；最小 smoke workflow 同样被拦；同账号公开/私有一次性仓库 A/B 结果一致。
