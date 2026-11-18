@@ -8,6 +8,8 @@
 
 > 详细需求见 [docs/PRD.md](docs/PRD.md)；协议见 [docs/PROTOCOL.md](docs/PROTOCOL.md)；架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)；
 > **交付/验收/已知坑见 [docs/HANDOVER.md](docs/HANDOVER.md)**；决策见 [docs/DECISIONS.md](docs/DECISIONS.md)。
+>
+> 仓库（私有）：<https://github.com/lianhuaxindi/dsh-phone> · CI：[`.github/workflows/ci.yml`](.github/workflows/ci.yml)
 
 ## 目录结构
 
