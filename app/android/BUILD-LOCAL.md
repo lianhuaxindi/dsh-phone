@@ -12,6 +12,43 @@ project path contains non-ASCII characters: `D:\code\apps\手机端\`.
 > This file is a deliverable. It is safe to commit. Tool downloads under
 > `.tools\` are **not** committed (`.tools/` is gitignored).
 
+## 0. v1.1 rebuild (2026-11-18, current) — QR scan / pickImage / multi-address
+
+The toolchain in this file did **not** change for v1.1 (D-033); only one runtime
+dependency was added. The numbers below supersede the v1.0 baseline recorded in
+sections 5–7 (which are kept as history).
+
+| Item | v1.1 value |
+|---|---|
+| New dependency | `com.google.zxing:core:3.5.3` (local QR decode, D-030) |
+| Default version | `versionName 1.1.0` / `versionCode 10100` (D-033; `-P` still overrides) |
+| Build command | same as §4 but `-Pdsphone.versionName=1.1.0 -Pdsphone.versionCode=10100` |
+| Build result | Final rebuild after web-ui v1.1 sync: `BUILD SUCCESSFUL in 27s` (35 actionable tasks: 5 executed, 30 up-to-date; `mergeDebugAssets` + `packageDebug` re-ran); first v1.1 build was `1m 17s` |
+| APK | `app\android\app\build\outputs\apk\debug\app-debug.apk` — **4,578,710 bytes** (final, with synced v1.1 Web assets) |
+| APK SHA-256 | `A45C164E55331ACF03697D7106DEC6C60DD37361AEE0E4C263DB14E726704601` |
+| badging | `package: name='com.dsh.phone' versionCode='10100' versionName='1.1.0'`, minSdk 29 / targetSdk 35 / compileSdk 35 |
+| Packaging | 49 ZIP entries, 9 `classes*.dex`, 26 `assets/web/*`; `scanPairing`/`pickImage` code and `ScanActivity` + `storage.ImageFileProvider` (authority `com.dsh.phone.fileprovider`) are packaged; `sync_web.ps1 -VerifyOnly` exits 0 after the build |
+| Unit tests | **10 classes / 71 tests, `OK (71 tests)`** in 0.414 s (direct JUnitCore, §7.2) |
+| Static checks | `verify_protocol.py` → `OK: 101 protocol checks`; `check_contract.py` (after web-ui v1.1 landed) → `OK: 17 web ops / 17 native ops (docs 17), 17 web events / 17 native events, 11 documented return events (0 warning(s))`; `check_kotlin_static.py` → `OK: 25 Kotlin files scanned, 0 failures, 0 warnings`; `check_gradle_config.py` → `OK: 67 configuration checks, 0 warning(s)` |
+| Build warnings | Final incremental build: `0` Kotlin warnings (Kotlin compile was up-to-date); the first v1.1 build showed 6 `MainActivity.kt` deprecations + the 6 `BtRouter.kt` SCO deprecations from the v1.0 baseline — see §9 |
+
+Device verification still required (nothing below ran on hardware):
+
+1. `ScanActivity`: Camera2 preview + YUV_420_888 `ImageReader` on different OEM
+   cameras, CAMERA permission deny/allow, QR decode latency, rotation/background
+   lifecycle, camera-in-use by another app.
+2. `pickImage`: camera `ACTION_IMAGE_CAPTURE` + `EXTRA_OUTPUT` grant through the
+   custom `ImageFileProvider` on OEM ROMs, gallery `ACTION_GET_CONTENT`, EXIF
+   rotation of camera photos, 1600 px / JPEG q80 / ≤2 MiB output on real photos,
+   `onShowFileChooser` round-trip from the Web UI.
+3. Multi-address connect: 3 s per-address timeout on slow Wi-Fi/hotspot, `hosts=`
+   fallback order, `last_host`/`known_hosts` persistence, the
+   `net.state{state:"error",reason:"all_addresses_failed","tried":[...]}` shape
+   (D-034) consumed by the v1.1 Web UI.
+4. Web UI v1.1 is now present (web-ui task-12 landed): it parses
+   `scanPairing.result{ok,...}`, `image.picked`, `connect{hosts}` and maps
+   `net.state{state:"error"}` per D-034. `check_contract.py` is 0 FAIL / 0 WARN.
+
 ## 1. Installed toolchain (location + version)
 
 Everything is installed under `D:\code\apps\手机端\.tools\android\`
@@ -141,7 +178,9 @@ the current thread and fails with `error = 5`).
   `$tools\logs\assemble-debug-incremental.log`) — the artifact is reproducible
   and the APK was not repackaged.
 - Version props were verified in the manifest: `versionCode=10000`,
-  `versionName=1.0.0`.
+  `versionName=1.0.0` (v1.0 baseline). The **v1.1 rebuild** produced
+  `versionCode=10100` / `versionName=1.1.0` (final rebuild after the web-ui v1.1
+  sync: 27 s incremental — see §0).
 
 ## 6. APK and its verification
 
@@ -150,6 +189,12 @@ Artifact:
 - Path: `D:\code\apps\手机端\app\android\app\build\outputs\apk\debug\app-debug.apk`
 - Size: **3,867,632 bytes**
 - SHA-256: `72C34DBA629475D421B517FD8976942DAC764A91985111DAC0FDA97E718CA408`
+
+> This is the v1.0 baseline (APK `1.0.0/10000`). The **final v1.1 APK**
+> (built after web-ui v1.1 assets were synced) is **4,578,710 bytes**,
+> SHA-256
+> `A45C164E55331ACF03697D7106DEC6C60DD37361AEE0E4C263DB14E726704601`,
+> badging `versionName='1.1.0' versionCode='10100'` — see §0.
 
 Verify identity / SDK levels / permissions:
 
@@ -206,10 +251,14 @@ $ham=(Get-ChildItem $cache -Recurse -Filter 'hamcrest-core-1.3.jar' -File|Select
 $kotlin=(Get-ChildItem $cache -Recurse -Filter 'kotlin-stdlib-*.jar' -File|Select -First 1).FullName
 $build='D:\code\apps\手机端\app\android\app\build'
 $cp="$build\tmp\kotlin-classes\debug;$build\tmp\kotlin-classes\debugUnitTest;$junit;$ham;$kotlin"
-& $java -cp $cp org.junit.runner.JUnitCore com.dsh.phone.log.RedactorTest com.dsh.phone.net.BackoffTest com.dsh.phone.net.ClosePolicyTest com.dsh.phone.protocol.AudioFrameTest com.dsh.phone.protocol.AuthTest com.dsh.phone.protocol.PairingTest com.dsh.phone.protocol.ProtocolTest com.dsh.phone.util.JsonTest
+& $java -cp $cp org.junit.runner.JUnitCore com.dsh.phone.log.RedactorTest com.dsh.phone.net.BackoffTest com.dsh.phone.net.ClosePolicyTest com.dsh.phone.net.AddressCandidatesTest com.dsh.phone.media.ImageScalerTest com.dsh.phone.protocol.AudioFrameTest com.dsh.phone.protocol.AuthTest com.dsh.phone.protocol.PairingTest com.dsh.phone.protocol.ProtocolTest com.dsh.phone.util.JsonTest
 ```
 
-Result: `OK (53 tests)` (8 test classes, ~0.3 s).
+Result: `OK (53 tests)` (8 test classes, ~0.3 s) for v1.0; the **v1.1 run is
+`OK (71 tests)`** (10 test classes, 0.414 s) — the two extra classes are
+`AddressCandidatesTest` and `ImageScalerTest`, and `PairingTest` gained 5 v1.1
+cases (hosts/name). Compile the test classes first if needed:
+`gradle :app:compileDebugUnitTestKotlin --no-daemon --console=plain --no-watch-fs`.
 
 ### 7.3 Workaround B (official Gradle test report): build/test from an ASCII temp copy
 
@@ -274,6 +323,11 @@ expected on this host and harmless.
 
 ## 9. Known warnings in the build log
 
+The v1.1 build was incremental: only `MainActivity.kt` recompiled, so its 6
+deprecations appeared (line numbers now `90`, `466`, `467`, `470`, `472`, `475`).
+A clean build shows the same 6 plus the 6 `BtRouter.kt` SCO deprecations listed
+below — no new warning category was introduced by v1.1.
+
 Kotlin deprecations (no action for M2; kept for M3 cleanup):
 
 - `MainActivity.kt`: `WebSettings.databaseEnabled` (`~:83`), `statusBarColor`
@@ -335,6 +389,31 @@ Only files inside `app/android/`; nothing was committed by the shell task
 - `app/android/app/src/main/java/com/dsh/phone/net/WssClient.kt` — subprotocol
   echo validation moved from a non-existent `onResponse` override into
   `onOpen(webSocket, response)`; on mismatch: log, close with
-  `PROTOCOL_ERROR`, emit `transport` error, `FAILED` state, `return` without
-  opening the session.
+  `PROTOCOL_ERROR`, emit `transport` error, `error` state (D-034 wire value),
+  `return` without opening the session.
 - `app/android/BUILD-LOCAL.md` — this document.
+
+### v1.1 additions (D-029/D-030/D-031/D-033), also inside `app/android/` only
+
+- New: `app/src/main/java/com/dsh/phone/ScanActivity.kt` (Camera2 + ZXing QR
+  scanner), `media/ImageScaler.kt`, `media/ImagePicker.kt`,
+  `storage/ImageFileProvider.kt`, `net/AddressCandidates.kt`;
+  tests `net/AddressCandidatesTest.kt`, `media/ImageScalerTest.kt`.
+- Modified: `protocol/Pairing.kt` (hosts/name + isCandidateHost/parseHosts),
+  `storage/SettingsStore.kt` (last_host/known_hosts), `net/WssClient.kt`
+  (multi-address candidate cycle, 3 s per address), `AppCore.kt`
+  (Host + scanPairing/pickImage request flow), `bridge/DshBridge.kt`
+  (`pickImage`, real `scanPairing`, connect `hosts`), `MainActivity.kt`
+  (`AppCore.Host`, `onShowFileChooser`, camera capture + gallery intents),
+  `AndroidManifest.xml` (`.ScanActivity` + `.storage.ImageFileProvider`),
+  `app/build.gradle.kts` (zxing core 3.5.3, default 1.1.0/10100),
+  `res/values*/strings.xml` (scan_hint/scan_cancel),
+  `tools/check_contract.py` (Web-pending FAIL → WARN),
+  `tools/check_kotlin_static.py` (camera/provider/pickImage/multi-address checks),
+  `tools/verify_protocol.py` (hosts/name + images/session.meta/usage/media),
+  `tools/check_gradle_config.py` (1.1.0/10100 + zxing), `README.md` (v1.1 section).
+- Build output (final, with synced v1.1 Web assets): APK **4,578,710 B**,
+  SHA-256
+  `A45C164E55331ACF03697D7106DEC6C60DD37361AEE0E4C263DB14E726704601`,
+  badging `1.1.0/10100`, 71 unit tests green, 4 static scripts exit 0
+  (`check_contract` now 0 WARN after web-ui v1.1 landed) — see §0.

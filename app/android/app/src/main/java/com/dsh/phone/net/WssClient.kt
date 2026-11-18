@@ -77,7 +77,10 @@ class WssClient(
         AUTHENTICATING("authenticating"),
         RECONNECTING("reconnecting"),
         ONLINE("online"),
-        FAILED("failed"),
+        // D-034: connection/fatal failures are reported as `error` on the wire
+        // (docs/ARCHITECTURE.md §3.2.1 freezes idle|connecting|online|closed|error;
+        // the Web UI renders `error` and unknown states as "disconnected").
+        ERROR("error"),
         CLOSED("closed"),
     }
 
@@ -86,6 +89,12 @@ class WssClient(
         val port: Int,
         val fingerprint: String,
         val deviceId: String,
+        /**
+         * Ordered candidate addresses (D-031). Index 0 is the URI `host`, but
+         * [AddressCandidates.order] may have moved the last successful address
+         * in front of it.
+         */
+        val candidates: List<String> = emptyList(),
     )
 
     private val lock = Any()
@@ -119,6 +128,21 @@ class WssClient(
     private var reconnectTask: ScheduledFuture<*>? = null
     private var heartbeatTask: ScheduledFuture<*>? = null
     private var watchdogTask: ScheduledFuture<*>? = null
+    private var candidateTimeoutTask: ScheduledFuture<*>? = null
+
+    /* Multi-address fallback state (D-031): one 3 s attempt per candidate. */
+    private data class AddressAttempt(
+        val host: String,
+        val port: Int,
+        val elapsedMs: Long,
+        val error: String,
+    )
+
+    private var candidateHosts: List<String> = emptyList()
+    private var candidateIndex = 0
+    private var currentCandidate: String = ""
+    private var candidateStartedAt = 0L
+    private val addressAttempts = ArrayList<AddressAttempt>()
 
     val currentState: State
         get() = synchronized(lock) { state }
@@ -127,28 +151,40 @@ class WssClient(
 
     /* ------------------------------------------------------------ lifecycle */
 
-    fun connect(host: String, port: Int, fingerprint: String, deviceId: String) {
+    fun connect(
+        host: String,
+        port: Int,
+        fingerprint: String,
+        deviceId: String,
+        hosts: List<String> = emptyList(),
+    ) {
         val normalized = try {
             Pairing.normalizeFingerprint(fingerprint)
         } catch (e: IllegalArgumentException) {
             emitError("tls", 1001, "invalid certificate fingerprint", false)
-            setState(State.FAILED)
+            setState(State.ERROR)
             return
         }
         if (host.isBlank() || port !in 1..65535) {
             emitError("connect", 5001, "invalid host or port", false)
-            setState(State.FAILED)
+            setState(State.ERROR)
             return
         }
         synchronized(lock) {
             if (released) return
-            config = ConnectionConfig(host.trim(), port, normalized, deviceId)
+            val candidates = AddressCandidates.order(
+                lastSuccess = settings.lastHost(),
+                primary = host.trim(),
+                extra = hosts,
+            )
+            config = ConnectionConfig(host.trim(), port, normalized, deviceId, candidates)
             manualClose = false
             reconnectAttempt = 0
             lastServerSeq = 0
             sessionTokenBase64 = null
             pendingOutbound.clear()
             reqIdBySeq.clear()
+            resetCandidateCycleLocked(candidates)
             cancelReconnectLocked()
             closeSocketLocked()
             beginConnectLocked()
@@ -327,6 +363,18 @@ class WssClient(
     private fun beginConnectLocked() {
         val cfg = config ?: return
         if (released || manualClose) return
+        if (candidateHosts.isEmpty()) {
+            resetCandidateCycleLocked(cfg.candidates.ifEmpty { listOf(cfg.host) })
+        }
+        if (candidateIndex >= candidateHosts.size) {
+            failAllCandidatesLocked()
+            scheduleReconnectLocked()
+            return
+        }
+        val candidate = candidateHosts[candidateIndex]
+        currentCandidate = candidate
+        candidateStartedAt = System.currentTimeMillis()
+        val attemptCfg = cfg.copy(host = candidate)
         generation += 1
         val gen = generation
         clientSeq = 0
@@ -337,22 +385,147 @@ class WssClient(
         connectStartedAt = System.currentTimeMillis()
         lastServerRecvAt = connectStartedAt
         setState(State.CONNECTING)
-        val client = obtainHttpClientLocked(cfg)
+        val client = obtainHttpClientLocked(attemptCfg)
         if (client == null) {
-            scheduleReconnectLocked()
+            recordCurrentAttemptLocked("tls_init_failed")
+            closeSocketLocked()
+            if (!advanceCandidateLocked()) {
+                scheduleReconnectLocked()
+            } else {
+                beginConnectLocked()
+            }
             return
         }
         val request = try {
-            buildRequest(cfg)
+            buildRequest(attemptCfg)
         } catch (e: Exception) {
             emitError("connect", 5001, "invalid server address", false)
             manualClose = true
-            setState(State.FAILED)
+            setState(State.ERROR)
             return
         }
-        LogStore.info("ws.connect", "host" to cfg.host, "port" to cfg.port, "attempt" to reconnectAttempt)
+        LogStore.info(
+            "ws.connect",
+            "host" to candidate,
+            "port" to cfg.port,
+            "attempt" to reconnectAttempt,
+            "candidate" to (candidateIndex + 1),
+            "candidates" to candidateHosts.size,
+        )
         socket = client.newWebSocket(request, listenerFor(gen))
         startTimersLocked()
+        beginCandidateTimeoutLocked(gen, candidate)
+    }
+
+    private fun resetCandidateCycleLocked(candidates: List<String>) {
+        candidateHosts = candidates
+        candidateIndex = 0
+        currentCandidate = candidates.firstOrNull().orEmpty()
+        candidateStartedAt = 0L
+        addressAttempts.clear()
+    }
+
+    /**
+     * Enforce the per-address 3 s connect budget (PROTOCOL §5.1): the OkHttp
+     * connect timeout is 15 s, so a dead candidate would otherwise stall the
+     * whole fallback chain far too long.
+     */
+    private fun beginCandidateTimeoutLocked(gen: Int, candidate: String) {
+        candidateTimeoutTask?.cancel(false)
+        candidateTimeoutTask = try {
+            scheduler.schedule(
+                {
+                    synchronized(lock) {
+                        if (released || manualClose) return@synchronized
+                        if (gen != generation) return@synchronized
+                        if (state != State.CONNECTING) return@synchronized
+                        if (candidate != currentCandidate) return@synchronized
+                        LogStore.warn(
+                            "ws.address_timeout",
+                            "host" to candidate,
+                            "timeoutMs" to AddressCandidates.ATTEMPT_TIMEOUT_MS,
+                        )
+                        recordCurrentAttemptLocked("timeout")
+                        closeSocketLocked()
+                        if (advanceCandidateLocked()) {
+                            beginConnectLocked()
+                        } else {
+                            scheduleReconnectLocked()
+                        }
+                    }
+                },
+                AddressCandidates.ATTEMPT_TIMEOUT_MS,
+                TimeUnit.MILLISECONDS,
+            )
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun recordCurrentAttemptLocked(error: String) {
+        val cfg = config ?: return
+        if (currentCandidate.isEmpty()) return
+        val elapsed = if (candidateStartedAt > 0) {
+            System.currentTimeMillis() - candidateStartedAt
+        } else {
+            0L
+        }
+        addressAttempts.add(AddressAttempt(currentCandidate, cfg.port, elapsed, error))
+    }
+
+    /** Select the next candidate; on exhaustion emit the D-031 diagnostic and return false. */
+    private fun advanceCandidateLocked(): Boolean {
+        if (candidateIndex + 1 >= candidateHosts.size) {
+            failAllCandidatesLocked()
+            return false
+        }
+        candidateIndex += 1
+        currentCandidate = candidateHosts[candidateIndex]
+        LogStore.info(
+            "ws.address_fallback",
+            "host" to currentCandidate,
+            "index" to candidateIndex,
+            "candidates" to candidateHosts.size,
+        )
+        return true
+    }
+
+    /**
+     * All candidate addresses failed. Emit a diagnostic `net.state` with the
+     * D-034 wire state `error` plus the usual `error` event; the caller then
+     * schedules a backoff retry so a network change can recover without user
+     * action. Extra fields (`reason`/`message`/`tried`) are additive and keep
+     * the Web UI able to show which addresses were attempted.
+     */
+    private fun failAllCandidatesLocked() {
+        val cfg = config
+        val port = cfg?.port ?: 0
+        val summary = if (addressAttempts.isEmpty()) {
+            "could not connect to the Bridge"
+        } else {
+            addressAttempts.joinToString(prefix = "all Bridge addresses failed: ", separator = ", ") {
+                "${it.host}:${it.port} (${it.elapsedMs} ms, ${it.error})"
+            }
+        }
+        LogStore.warn("ws.connect_failed", "message" to summary)
+        val tried = addressAttempts.joinToString(",") { attempt ->
+            JsonObj()
+                .put("host", attempt.host)
+                .put("port", attempt.port)
+                .put("elapsedMs", attempt.elapsedMs)
+                .put("error", attempt.error)
+                .toJsonText()
+        }
+        val event = JsonObj()
+            .put("type", "net.state")
+            .put("state", State.ERROR.wire)
+            .put("reason", "all_addresses_failed")
+            .put("message", summary)
+            .putRaw("tried", "[$tried]")
+        if (serverId != null) event.put("serverId", serverId)
+        state = State.ERROR
+        callbacks.emitEvent(event.toJsonText())
+        emitError("connect", 5001, summary, true)
     }
 
     private fun obtainHttpClientLocked(cfg: ConnectionConfig): OkHttpClient? {
@@ -426,7 +599,7 @@ class WssClient(
                             "server did not accept subprotocol " + Protocol.SUBPROTOCOL,
                             false,
                         )
-                        setState(State.FAILED)
+                        setState(State.ERROR)
                     }
                 }
                 return
@@ -470,9 +643,18 @@ class WssClient(
             }
             return
         }
+        candidateTimeoutTask?.cancel(false)
+        candidateTimeoutTask = null
         socket = webSocket
         lastServerRecvAt = System.currentTimeMillis()
         connectStartedAt = lastServerRecvAt
+        // D-031: remember the address that actually worked (primary first next time)
+        // and keep the candidate list for automatic reconnects after a restart.
+        if (currentCandidate.isNotEmpty()) {
+            settings.setLastHost(currentCandidate)
+            settings.setKnownHosts(candidateHosts)
+        }
+        LogStore.info("ws.connected", "host" to currentCandidate)
         sendHelloLocked()
     }
 
@@ -484,6 +666,16 @@ class WssClient(
         cancelReconnectLocked()
         if (manualClose) {
             setState(State.CLOSED)
+            return
+        }
+        if (state == State.CONNECTING) {
+            // A candidate rejected the handshake before hello.ok; try the next one.
+            recordCurrentAttemptLocked("closed:$code")
+            if (advanceCandidateLocked()) {
+                beginConnectLocked()
+            } else {
+                scheduleReconnectLocked()
+            }
             return
         }
         LogStore.warn("ws.closed", "code" to code)
@@ -507,7 +699,7 @@ class WssClient(
                 callbacks.onConnectionLost("fatal:$code")
                 manualClose = true
                 emitError("transport", 5001, "connection closed with code $code", false)
-                setState(State.FAILED)
+                setState(State.ERROR)
             }
         }
     }
@@ -528,8 +720,16 @@ class WssClient(
         if (message.contains("fingerprint", ignoreCase = true)) {
             manualClose = true
             emitError("tls", 1001, "certificate fingerprint mismatch; re-pair with the correct fingerprint", false)
-            setState(State.FAILED)
+            setState(State.ERROR)
             return
+        }
+        if (state == State.CONNECTING) {
+            // Multi-address fallback (D-031): 3 s per candidate, next on failure.
+            recordCurrentAttemptLocked("failure")
+            if (advanceCandidateLocked()) {
+                beginConnectLocked()
+                return
+            }
         }
         scheduleReconnectLocked()
     }
@@ -658,7 +858,7 @@ class WssClient(
             .put("message", message)
             .put("needPair", needPair)
         callbacks.emitEvent(event.toJsonText())
-        if (needPair) setState(State.PAIRING) else setState(State.FAILED)
+        if (needPair) setState(State.PAIRING) else setState(State.ERROR)
     }
 
     private fun sendHelloLocked() {
@@ -838,6 +1038,8 @@ class WssClient(
         heartbeatTask = null
         watchdogTask?.cancel(false)
         watchdogTask = null
+        candidateTimeoutTask?.cancel(false)
+        candidateTimeoutTask = null
     }
 
     private fun heartbeatTickLocked() {
@@ -896,6 +1098,9 @@ class WssClient(
                     synchronized(lock) {
                         if (released || manualClose || config == null) return@synchronized
                         if (state != State.RECONNECTING) return@synchronized
+                        // A fresh reconnect cycle starts from the best candidate again
+                        // (last success first, then the URI order).
+                        config?.let { resetCandidateCycleLocked(it.candidates.ifEmpty { listOf(it.host) }) }
                         beginConnectLocked()
                     }
                 },
@@ -915,6 +1120,8 @@ class WssClient(
     private fun closeSocketLocked() {
         generation += 1
         stopTimersLocked()
+        candidateTimeoutTask?.cancel(false)
+        candidateTimeoutTask = null
         val ws = socket
         socket = null
         if (ws != null) {

@@ -59,6 +59,9 @@ export class ChatView {
     this._recordingStartedAt = null;
     this._partialFrame = null;
     this._pendingPartialText = '';
+    this.pendingImages = [];
+    this._pendingSignature = '';
+    this.chatMeta = null;
     this._build();
   }
 
@@ -66,23 +69,36 @@ export class ChatView {
     clear(this.root);
     this.sessionTitle = h('h1', { class: 'chat__title' });
     this.statusChip = h('span', { class: 'chip chip--status', role: 'status' });
-    this.backButton = h(
+    this.menuButton = h(
       'button',
       {
         type: 'button',
         class: 'icon-button',
-        'aria-label': t('a11y.back'),
-        title: t('nav.back'),
-        onclick: () => (this.onBack ?? this.onOpenSessions)?.(),
+        'aria-label': t('a11y.openMenu'),
+        title: t('nav.menu'),
+        onclick: () => (this.onOpenSessions ?? this.onBack)?.(),
       },
-      '‹',
+      '☰',
     );
+
+    // v1.1 top bar (D-032): model chip, thinking chip and context usage.
+    this.modelChip = h('span', { class: 'chip chip--model' });
+    this.reasoningChip = h('span', { class: 'chip chip--reasoning' });
+    this.contextBar = h('span', { class: 'chat__context-bar' }, h('span', { class: 'chat__context-fill' }));
+    this.contextMeter = h(
+      'div',
+      { class: 'chat__context', role: 'status' },
+      this.contextBar,
+      h('span', { class: 'chat__context-label' }),
+    );
+    this.metaRow = h('div', { class: 'chat__meta' }, this.modelChip, this.reasoningChip, this.contextMeter);
+    setHidden(this.metaRow, true);
+
     this.header = h(
       'header',
       { class: 'chat__header' },
-      this.backButton,
-      h('div', { class: 'chat__heading' }, this.sessionTitle),
-      this.statusChip,
+      h('div', { class: 'chat__header-main' }, this.menuButton, h('div', { class: 'chat__heading' }, this.sessionTitle), this.statusChip),
+      this.metaRow,
     );
 
     this.list = h('div', { class: 'chat__messages', role: 'log', 'aria-live': 'polite', tabindex: '0' });
@@ -195,11 +211,49 @@ export class ChatView {
     );
     this._bindPushToTalk();
 
+    this.attachButton = h(
+      'button',
+      {
+        type: 'button',
+        class: 'chat__attach',
+        'data-action': 'chat-attach',
+        'aria-label': t('a11y.attachImage'),
+        title: t('chat.attachImage'),
+        onclick: () => this._pickImage('gallery'),
+      },
+      '📎',
+    );
+    this.cameraButton = h(
+      'button',
+      {
+        type: 'button',
+        class: 'chat__camera',
+        'data-action': 'chat-camera',
+        'aria-label': t('a11y.takePhoto'),
+        title: t('chat.takePhoto'),
+        onclick: () => this._pickImage('camera'),
+      },
+      '📷',
+    );
+
+    this.attachments = h('div', { class: 'chat__attachments' });
+    setHidden(this.attachments, true);
+
     this.composer = h(
       'div',
       { class: 'chat__composer' },
       this.partialPreview,
-      h('div', { class: 'chat__composer-row' }, this.textarea, this.micButton, this.sendButton, this.stopButton),
+      this.attachments,
+      h(
+        'div',
+        { class: 'chat__composer-row' },
+        this.attachButton,
+        this.cameraButton,
+        this.textarea,
+        this.micButton,
+        this.sendButton,
+        this.stopButton,
+      ),
       h('div', { class: 'chat__composer-meta' }, this.autoSendChip),
     );
 
@@ -259,6 +313,9 @@ export class ChatView {
       controller.on('audio-route', (route) => this.overlay?.update(this._routePatch(route))),
       controller.on('error', (payload) => this._showError(payload)),
       controller.on('toast', (payload) => this.toast?.show(payload)),
+      controller.on('chat-meta', ({ meta }) => this._renderChatMeta(meta)),
+      controller.on('pending-images', ({ images }) => this._renderPendingImages(images)),
+      controller.on('media', ({ mediaId, media }) => this._onMedia(mediaId, media)),
     );
   }
 
@@ -293,13 +350,152 @@ export class ChatView {
     setClass(this.micButton, 'chat__mic--disabled', !snapshot.canRecord);
     this._syncSendState();
     this._renderAutoSendChip(snapshot.settings?.autoSend !== false);
+    this._renderChatMeta(snapshot.chatMeta);
+    this._renderPendingImages(snapshot.pendingImages ?? []);
     this.emptyState.hidden = (snapshot.messages?.length ?? 0) > 0;
   }
 
-  /** Send is enabled only with a non-empty draft while the composer is live. */
+  /** Send is enabled with a non-empty draft or at least one attached image. */
   _syncSendState() {
     const empty = !String(this.textarea.value ?? '').trim();
-    this.sendButton.disabled = empty || Boolean(this.textarea.disabled);
+    const hasImages = Array.isArray(this.pendingImages) && this.pendingImages.length > 0;
+    this.sendButton.disabled = (empty && !hasImages) || Boolean(this.textarea.disabled);
+  }
+
+  /* ---------------------------------------------- v1.1 top bar & images */
+
+  /** Model / thinking / context row (D-032). Hidden until the server sends meta. */
+  _renderChatMeta(meta) {
+    this.chatMeta = meta ?? null;
+    setHidden(this.metaRow, !meta);
+    if (!meta) return;
+    setHidden(this.modelChip, !meta.modelLabel);
+    this.modelChip.textContent = meta.modelLabel ?? '';
+    this.modelChip.title = meta.modelLabel ? t('a11y.modelChip', { model: meta.modelLabel }) : '';
+    const effort = meta.reasoningEffort;
+    const effortLabels = { low: 'chat.thinkingLow', high: 'chat.thinkingHigh', max: 'chat.thinkingMax' };
+    const showEffort = Boolean(effort && effortLabels[effort]);
+    setHidden(this.reasoningChip, !showEffort);
+    this.reasoningChip.textContent = showEffort ? t(effortLabels[effort]) : '';
+    this.reasoningChip.title = showEffort ? t('a11y.reasoningChip', { level: this.reasoningChip.textContent }) : '';
+    const percent = Number.isFinite(meta.percent) ? Math.max(0, Math.min(100, meta.percent)) : 0;
+    const fill = this.contextBar.firstChild;
+    if (fill) fill.style.width = `${percent}%`;
+    const label = this.contextMeter.querySelector('.chat__context-label');
+    if (label) {
+      label.textContent = meta.usedTokens !== null && meta.usedTokens !== undefined
+        ? t('chat.contextDetail', {
+            used: formatTokenCount(meta.usedTokens),
+            total: formatTokenCount(meta.contextWindow),
+            percent,
+          })
+        : t('chat.contextEmpty');
+      const base = meta.estimated ? `${t('chat.contextLabel')} · ${t('chat.contextEstimated')}` : t('chat.contextLabel');
+      this.contextMeter.title = meta.estimated
+        ? t('chat.contextEstimated')
+        : t('a11y.contextMeter', { percent });
+      this.contextMeter.setAttribute('aria-label', `${base} ${label.textContent}`);
+    }
+    this.contextMeter.hidden = meta.usedTokens === null && meta.percent === null;
+  }
+
+  /** Pending attachment thumbnails above the composer. */
+  _renderPendingImages(images) {
+    const next = Array.isArray(images) ? images : [];
+    const signature = next.map((image) => `${image.id}:${image.mimeType}:${image.data.length}`).join('|');
+    if (signature === this._pendingSignature) return;
+    this._pendingSignature = signature;
+    this.pendingImages = next;
+    clear(this.attachments);
+    setHidden(this.attachments, this.pendingImages.length === 0);
+    for (const image of this.pendingImages) {
+      const thumb = h('img', {
+        class: 'attachment__image',
+        alt: image.name || t('a11y.imagePreview'),
+        src: dataUri(image.mimeType, image.data),
+      });
+      const remove = h(
+        'button',
+        {
+          type: 'button',
+          class: 'attachment__remove',
+          'aria-label': t('a11y.removeImage'),
+          title: t('chat.removeImage'),
+          onclick: () => this.controller.removeImage?.(image.id),
+        },
+        '×',
+      );
+      this.attachments.appendChild(h('div', { class: 'attachment', 'data-image-id': image.id }, thumb, remove));
+    }
+    this._syncSendState();
+  }
+
+  async _pickImage(source) {
+    this.attachButton.disabled = true;
+    this.cameraButton.disabled = true;
+    try {
+      await this.controller.attachImage?.(source);
+    } catch {
+      this.toast?.show({ key: 'chat.imagePickFailed', vars: { reason: 'unsupported' } });
+    } finally {
+      this.attachButton.disabled = false;
+      this.cameraButton.disabled = false;
+      this._syncSendState();
+    }
+  }
+
+  /** Media bytes arrived: fill any waiting <img> placeholders. */
+  _onMedia(mediaId, media) {
+    const slots = this.list.querySelectorAll(`[data-media-id="${cssEscape(String(mediaId))}"]`);
+    for (const slot of slots) this._applyMediaToSlot(slot, media);
+  }
+
+  _applyMediaToSlot(slot, media) {
+    if (!media || typeof media.data !== 'string') {
+      slot.classList.add('message__image--failed');
+      const placeholder = slot.querySelector('.message__image-placeholder');
+      if (placeholder) placeholder.textContent = t('chat.imageLoadFailed');
+      return;
+    }
+    const image = slot.querySelector('img');
+    if (!image) {
+      slot.appendChild(
+        h('img', {
+          class: 'message__image',
+          alt: t('a11y.imagePreview'),
+          src: dataUri(media.mimeType, media.data),
+          onload: () => slot.classList.add('message__image--loaded'),
+          onerror: () => slot.classList.add('message__image--failed'),
+        }),
+      );
+    } else {
+      image.src = dataUri(media.mimeType, media.data);
+    }
+    const placeholder = slot.querySelector('.message__image-placeholder');
+    if (placeholder) placeholder.remove();
+  }
+
+  /** Render a message's image grid; loads bytes through controller.loadMedia. */
+  _renderImages(container, images) {
+    const list = Array.isArray(images) ? images : [];
+    if (list.length === 0) return;
+    const grid = h('div', { class: `message__images message__images--${Math.min(list.length, 4)}` });
+    for (const image of list) {
+      const mediaId = String(image.mediaId ?? '');
+      const slot = h('div', { class: 'message__image-slot', 'data-media-id': mediaId });
+      const cached = this.controller.mediaFor?.(mediaId);
+      if (cached) {
+        this._applyMediaToSlot(slot, cached);
+      } else {
+        slot.classList.add('message__image--loading');
+        slot.appendChild(h('span', { class: 'message__image-placeholder' }, '⏳'));
+        Promise.resolve(this.controller.loadMedia?.(mediaId))
+          .then((media) => this._applyMediaToSlot(slot, media))
+          .catch(() => this._applyMediaToSlot(slot, null));
+      }
+      grid.appendChild(slot);
+    }
+    container.appendChild(grid);
   }
 
   _restoreDraft(draft) {
@@ -379,6 +575,7 @@ export class ChatView {
     if (actions.childElementCount > 0) node.appendChild(actions);
 
     this._renderContent(content, message.text ?? '');
+    this._renderImages(content, message.images);
     if (message.status === 'streaming') node.classList.add('message--streaming');
     if (message.status === 'error') node.classList.add('message--error');
 
@@ -388,6 +585,7 @@ export class ChatView {
       body: content,
       text: message.text ?? '',
       status: message.status,
+      images: Array.isArray(message.images) ? message.images : [],
       toolLine,
     });
     if (!silent) this.emptyState.hidden = true;
@@ -422,7 +620,9 @@ export class ChatView {
       return;
     }
     entry.text = message.text ?? entry.text;
+    entry.images = Array.isArray(message.images) ? message.images : entry.images ?? [];
     this._renderContent(entry.body, entry.text);
+    this._renderImages(entry.body, entry.images);
     setClass(entry.node, 'message--streaming', message.status === 'streaming');
     setClass(entry.node, 'message--error', message.status === 'error');
     const copyButton = entry.node.querySelector('.message__copy');
@@ -677,7 +877,8 @@ export class ChatView {
       return;
     }
     const text = this.textarea.value;
-    if (!text.trim()) {
+    const hasImages = Array.isArray(this.pendingImages) && this.pendingImages.length > 0;
+    if (!text.trim() && !hasImages) {
       this.toast?.show({ key: 'chat.emptyBlocked' });
       return;
     }
@@ -728,6 +929,27 @@ export function createChatView(options) {
   const view = new ChatView(options);
   view.mount();
   return view;
+}
+
+/** Compact token count for the context-meter label (1200 → 1.2K). */
+export function formatTokenCount(value) {
+  const count = Number(value);
+  if (!Number.isFinite(count) || count < 0) return '0';
+  if (count >= 1_000_000) return `${Number((count / 1_000_000).toFixed(1))}M`;
+  if (count >= 1_000) return `${Number((count / 1_000).toFixed(1))}K`;
+  return String(Math.round(count));
+}
+
+/** Build a data URI from base64 media bytes (message images). */
+export function dataUri(mimeType, base64) {
+  const mime = typeof mimeType === 'string' && mimeType ? mimeType : 'image/jpeg';
+  return `data:${mime};base64,${base64}`;
+}
+
+/** Minimal CSS.escape fallback for older WebViews. */
+function cssEscape(value) {
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') return CSS.escape(value);
+  return String(value).replace(/["\\]/g, '\\$&');
 }
 
 /** Exported for tests: the exact follow threshold used by the scroll logic. */

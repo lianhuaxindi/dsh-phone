@@ -2,16 +2,19 @@ package com.dsh.phone
 
 import android.Manifest
 import android.app.Activity
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.MediaStore
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.ConsoleMessage
 import android.webkit.PermissionRequest
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -23,6 +26,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import com.dsh.phone.bridge.DshBridge
 import com.dsh.phone.log.LogStore
+import com.dsh.phone.storage.ImageFileProvider
 import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.io.InputStream
@@ -36,13 +40,15 @@ import java.util.Collections
  * modules, IndexedDB and service-worker-free secure-context APIs behave the same
  * way they do in a browser.
  */
-class MainActivity : Activity() {
+class MainActivity : Activity(), AppCore.Host {
 
     private lateinit var webView: WebView
     private lateinit var fallbackView: View
     private lateinit var bridge: DshBridge
     private var firstPageFinished = true
     private var lastNightMode = false
+    private var pendingCaptureUri: Uri? = null
+    private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -70,6 +76,7 @@ class MainActivity : Activity() {
 
         bridge = DshBridge(webView)
         webView.addJavascriptInterface(bridge, "DshNative")
+        AppCore.setHost(this)
 
         applySystemBars()
         requestStartPermissions()
@@ -151,6 +158,30 @@ class MainActivity : Activity() {
                 }
             }
 
+            override fun onShowFileChooser(
+                view: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: WebChromeClient.FileChooserParams?,
+            ): Boolean {
+                val callback = filePathCallback ?: return false
+                // Only one pending chooser at a time; drop a previous unanswered one.
+                fileChooserCallback?.onReceiveValue(null)
+                fileChooserCallback = callback
+                val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    // The UI only offers images; keep the Web form fallback narrow.
+                    type = "image/*"
+                }
+                return try {
+                    startActivityForResult(intent, REQUEST_FILE_CHOOSER)
+                    true
+                } catch (e: Exception) {
+                    fileChooserCallback = null
+                    LogStore.warn("web.file_chooser_failed")
+                    false
+                }
+            }
+
             override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
                 if (BuildConfig.DEBUG && consoleMessage != null) {
                     LogStore.debug(
@@ -160,6 +191,96 @@ class MainActivity : Activity() {
                     )
                 }
                 return true
+            }
+        }
+    }
+
+    /* ------------------------------------------------------- native host ops */
+
+    override fun launchQrScanner() {
+        startActivityForResult(Intent(this, ScanActivity::class.java), REQUEST_SCAN)
+    }
+
+    override fun launchImagePicker(source: String): Boolean {
+        val intent = when (source) {
+            AppCore.SOURCE_CAMERA -> buildCaptureIntent() ?: return false
+            else -> Intent(Intent.ACTION_GET_CONTENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "image/*"
+            }
+        }
+        val requestCode = if (source == AppCore.SOURCE_CAMERA) {
+            REQUEST_IMAGE_CAPTURE
+        } else {
+            REQUEST_IMAGE_GALLERY
+        }
+        return try {
+            startActivityForResult(intent, requestCode)
+            true
+        } catch (e: Exception) {
+            LogStore.warn("image.launch_failed")
+            false
+        }
+    }
+
+    /**
+     * Camera capture writes into a private cache file exposed through
+     * [ImageFileProvider] (D-029): no `WRITE_EXTERNAL_STORAGE`, no legacy paths.
+     */
+    private fun buildCaptureIntent(): Intent? {
+        return try {
+            val file = ImageFileProvider.newCaptureFile(this) ?: return null
+            val uri = ImageFileProvider.uriFor(file)
+            pendingCaptureUri = uri
+            Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
+                putExtra(MediaStore.EXTRA_OUTPUT, uri)
+                addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+        } catch (e: Exception) {
+            LogStore.warn("image.capture_intent_failed")
+            null
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        when (requestCode) {
+            REQUEST_SCAN -> {
+                if (resultCode == RESULT_OK) {
+                    AppCore.onScanResult(data?.getStringExtra(ScanActivity.EXTRA_URI), null)
+                } else {
+                    AppCore.onScanResult(
+                        null,
+                        data?.getStringExtra(ScanActivity.EXTRA_REASON)
+                            ?: ScanActivity.REASON_CANCELLED,
+                    )
+                }
+            }
+
+            REQUEST_IMAGE_GALLERY -> {
+                if (resultCode == RESULT_OK) {
+                    AppCore.onImagePicked(data?.data)
+                } else {
+                    AppCore.onImagePickCancelled()
+                }
+            }
+
+            REQUEST_IMAGE_CAPTURE -> {
+                val uri = pendingCaptureUri
+                pendingCaptureUri = null
+                if (resultCode == RESULT_OK && uri != null) {
+                    AppCore.onImagePicked(uri)
+                } else {
+                    AppCore.onImagePickCancelled()
+                }
+            }
+
+            REQUEST_FILE_CHOOSER -> {
+                val callback = fileChooserCallback
+                fileChooserCallback = null
+                callback?.onReceiveValue(
+                    WebChromeClient.FileChooserParams.parseResult(resultCode, data),
+                )
             }
         }
     }
@@ -289,6 +410,10 @@ class MainActivity : Activity() {
             } catch (e: Exception) {
                 LogStore.warn("app.finish_stop_failed")
             }
+            AppCore.setHost(null)
+            val chooser = fileChooserCallback
+            fileChooserCallback = null
+            chooser?.onReceiveValue(null)
             AppCore.setEventSink(null)
         }
         try {
@@ -396,6 +521,10 @@ class MainActivity : Activity() {
         const val DEFAULT_DOCUMENT = "index.html"
         const val ASSET_ROOT = "web"
         const val REQUEST_START_PERMISSIONS = 1003
+        const val REQUEST_SCAN = 1010
+        const val REQUEST_IMAGE_GALLERY = 1011
+        const val REQUEST_IMAGE_CAPTURE = 1012
+        const val REQUEST_FILE_CHOOSER = 1013
 
         const val BACK_PROBE =
             "(function(){try{return (window.DshBridge && " +

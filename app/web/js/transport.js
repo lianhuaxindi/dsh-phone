@@ -26,7 +26,9 @@
  *   routeInfo() / preferDevice(address)   audio routing
  *   notify({title, text})                 P1 notification passthrough
  *   exportLogs()                          ask the bridge to export logs
- *   scanPairing()                         resolve pairing info (V1: unsupported)
+ *   scanPairing()                         open the QR scanner (v1.1) / manual hint
+ *   pickImage({source})                   camera/gallery picker, resolves image
+ *   mediaGet(mediaId)                     protocol v1.1 `media.get` request
  *   on(event, fn)                         subscription, returns unsubscribe
  *   setBackHandler(fn)                    Android back key; returns consumed
  *
@@ -47,7 +49,7 @@
  *   same behaviour, and WsTransport emulates it using the wire `replyTo`.
  */
 
-import { PROTOCOL, MsgType, ErrorCode, CloseCode, SeqCounter, buildHello, buildPairRequest, buildAuth, buildPing, buildResync, buildSessionList, encodeMessage } from './protocol.js';
+import { PROTOCOL, MsgType, ErrorCode, CloseCode, SeqCounter, buildHello, buildPairRequest, buildAuth, buildPing, buildResync, buildSessionList, buildMediaGet, normalizeMediaData, encodeMessage } from './protocol.js';
 import { TransportMode } from './config.js';
 import { realScheduler } from './scheduler.js';
 
@@ -254,6 +256,25 @@ export class BaseTransport {
     return this._scanPairing();
   }
 
+  /**
+   * Ask the native side for an image (PROTOCOL v1.1 / ARCHITECTURE §3.2:
+   * `pickImage{source}` → `image.picked` | `image.pickFailed`).
+   * @param {'gallery'|'camera'} source
+   * @returns {Promise<{ok: boolean, image?: {data: string, mimeType: string, name?: string, width?: number, height?: number}, reason?: string}>}
+   */
+  async pickImage(source) {
+    return this._pickImage(source);
+  }
+
+  /**
+   * Fetch one chat image from the bridge (`media.get` → `media.data`).
+   * @param {string} mediaId
+   * @returns {Promise<{ok: boolean, media?: {mediaId: string, mimeType: string, data: string}, code?: number, reason?: string}>}
+   */
+  async mediaGet(mediaId) {
+    return this._mediaGet(mediaId);
+  }
+
   /* ------------------------------------------- defaults for subclasses */
 
   _connect() {
@@ -302,6 +323,14 @@ export class BaseTransport {
   async _scanPairing() {
     return { supported: false };
   }
+
+  async _pickImage(source) {
+    return { ok: false, reason: 'unsupported', source };
+  }
+
+  async _mediaGet(mediaId) {
+    return { ok: false, reason: 'unsupported', mediaId };
+  }
 }
 
 /* ========================================================================= */
@@ -330,6 +359,14 @@ export class NativeTransport extends BaseTransport {
     this.scope = scope;
     this._scanResolvers = [];
     this._scanTimer = null;
+    /** How long the scanner UI may stay open before falling back to manual (ms). */
+    this.scanTimeoutMs = 10 * 60 * 1000;
+    /** Pending `pickImage` promises while the native picker UI is open. */
+    this._pickResolvers = [];
+    /** In-flight `media.get` requests keyed by local `_reqId`. */
+    this._mediaRequests = new Map();
+    this._mediaSeq = 0;
+    this.mediaTimeoutMs = 20000;
     this._installBridge(scope);
   }
 
@@ -473,10 +510,10 @@ export class NativeTransport extends BaseTransport {
       this._scanResolvers.push(resolve);
       const posted = this.post('scanPairing');
       if (!posted) {
-        this._settleScan({ supported: false });
+        this._settleScan({ ok: false, supported: false, reason: 'unsupported' });
         return;
       }
-      this._scanTimer = this.scheduler.setTimeout(() => this._settleScan({ supported: false }), 2500);
+      this._scanTimer = this.scheduler.setTimeout(() => this._settleScan({ ok: false, supported: false, reason: 'timeout' }), this.scanTimeoutMs);
     });
   }
 
@@ -488,6 +525,58 @@ export class NativeTransport extends BaseTransport {
     const resolvers = this._scanResolvers;
     this._scanResolvers = [];
     for (const resolve of resolvers) resolve(result);
+  }
+
+  /* --------------------------------------------------- images (v1.1) */
+
+  async _pickImage(source) {
+    if (source !== 'gallery' && source !== 'camera') {
+      return { ok: false, reason: 'bad_source' };
+    }
+    if (this._pickResolvers.length > 0) return { ok: false, reason: 'busy' };
+    return new Promise((resolve) => {
+      this._pickResolvers.push(resolve);
+      const posted = this.post('pickImage', { source });
+      if (!posted) this._settlePick({ ok: false, reason: 'unsupported' });
+    });
+  }
+
+  _settlePick(result) {
+    const resolvers = this._pickResolvers;
+    this._pickResolvers = [];
+    for (const resolve of resolvers) resolve(result);
+  }
+
+  async _mediaGet(mediaId) {
+    if (!mediaId) return { ok: false, code: 3001, reason: 'unknown-media' };
+    const _reqId = `media-${++this._mediaSeq}`;
+    return new Promise((resolve) => {
+      const timer = this.scheduler.setTimeout(() => {
+        this._mediaRequests.delete(_reqId);
+        resolve({ ok: false, code: 5001, reason: 'timeout' });
+      }, this.mediaTimeoutMs);
+      this._mediaRequests.set(_reqId, {
+        resolve: (message) => {
+          this.scheduler.clearTimeout(timer);
+          if (message?.type === MsgType.MEDIA_DATA) {
+            try {
+              resolve({ ok: true, media: normalizeMediaData(message) });
+            } catch (error) {
+              resolve({ ok: false, code: message.code ?? 3001, reason: String(error?.message ?? error) });
+            }
+          } else {
+            resolve({ ok: false, code: Number(message?.code ?? 3001), reason: message?.message ?? 'media unavailable' });
+          }
+        },
+      });
+      try {
+        this.send({ ...buildMediaGet(null, { mediaId }), _reqId });
+      } catch (error) {
+        this.scheduler.clearTimeout(timer);
+        this._mediaRequests.delete(_reqId);
+        resolve({ ok: false, code: 5001, reason: String(error?.message ?? error) });
+      }
+    });
   }
 
   /* -------------------------------------------------------------- events */
@@ -519,11 +608,22 @@ export class NativeTransport extends BaseTransport {
         break;
       case 'proto.message': {
         const rawMessage = payload.message ?? payload.json ?? payload.payload;
+        let message;
         try {
-          this.emit(TransportEvent.MESSAGE, normalizeInboundMessage(rawMessage));
+          message = normalizeInboundMessage(rawMessage);
         } catch (error) {
           this.emitError({ scope: 'protocol', code: 5002, message: `bad proto.message: ${error?.message ?? error}`, retryable: false });
+          break;
         }
+        // `media.get` replies are transport-internal: resolve the pending
+        // promise instead of surfacing a protocol message the UI can't use.
+        if (typeof message._reqTo === 'string' && this._mediaRequests.has(message._reqTo)) {
+          const pending = this._mediaRequests.get(message._reqTo);
+          this._mediaRequests.delete(message._reqTo);
+          pending?.resolve(message);
+          break;
+        }
+        this.emit(TransportEvent.MESSAGE, message);
         break;
       }
       case 'audio.state':
@@ -573,17 +673,46 @@ export class NativeTransport extends BaseTransport {
       case 'settings.audioRoute':
         this.emit(TransportEvent.EVENT, { type, address: payload.address });
         break;
-      case 'scan.result':
-      case 'scanPairing.result':
-        this._settleScan({
-          supported: Boolean(payload.supported),
-          host: payload.host,
-          port: payload.port,
-          fp: payload.fp,
-          code: payload.code,
-          uri: payload.uri,
+      case 'image.picked':
+        this._settlePick({
+          ok: true,
+          data: String(payload.data ?? payload.image?.data ?? ''),
+          mimeType: String(payload.mimeType ?? payload.image?.mimeType ?? 'image/jpeg'),
+          name: payload.name ?? payload.image?.name,
+          width: payload.width ?? payload.image?.width,
+          height: payload.height ?? payload.image?.height,
+          source: payload.source ?? payload.image?.source,
         });
         break;
+      case 'image.pickFailed':
+        this._settlePick({ ok: false, reason: String(payload.reason ?? 'unknown') });
+        break;
+      case 'scanPairing.result': {
+        // v1.1 (D-030): real Camera2 + ZXing result from the native bridge.
+        // No `{supported:false}` stub anymore; the legacy `scan.result` alias
+        // was dropped so check_contract has no stale Web-side assumption.
+        if (payload.ok === true) {
+          this._settleScan({
+            ok: true,
+            supported: true,
+            uri: payload.uri,
+            host: payload.host,
+            port: payload.port,
+            fp: payload.fp,
+            code: payload.code,
+            sid: payload.sid,
+            hosts: Array.isArray(payload.hosts) ? payload.hosts.map(String) : [],
+            name: payload.name,
+          });
+        } else {
+          this._settleScan({
+            ok: false,
+            supported: payload.supported !== false,
+            reason: String(payload.reason ?? 'unknown'),
+          });
+        }
+        break;
+      }
       case '':
         // Some bridges send `{event: ...}` with a nested payload; ignore unknown.
         break;
@@ -603,10 +732,18 @@ export class NativeTransport extends BaseTransport {
       online: TransportState.ONLINE,
       reconnecting: TransportState.RECONNECTING,
       failed: TransportState.FAILED,
+      // D-034: v1.1 bridges report terminal connection failures as `error`
+      // (e.g. reason `all_addresses_failed`) instead of `failed`.
+      error: TransportState.FAILED,
       closed: TransportState.CLOSED,
     };
     const state = mapping[raw] ?? TransportState.CLOSED;
-    this.emitState(state, { serverId: payload.serverId });
+    const detail = {};
+    if (payload.serverId !== undefined) detail.serverId = payload.serverId;
+    if (payload.reason !== undefined) detail.reason = payload.reason;
+    if (payload.message !== undefined) detail.message = payload.message;
+    if (Array.isArray(payload.tried)) detail.tried = payload.tried;
+    this.emitState(state, detail);
   }
 
   _onPairResult(payload) {
@@ -671,6 +808,8 @@ export class WsTransport extends BaseTransport {
     this._onOpenHandled = false;
     this._pingTimer = null;
     this._lastSeenSeq = 0;
+    this._mediaRequests = new Map();
+    this._mediaSeq = 0;
   }
 
   _connect(config = {}) {
@@ -830,6 +969,12 @@ export class WsTransport extends BaseTransport {
       this._pairSeq.delete(replyTo);
       message = { ...message, _reqTo: reqId };
     }
+    if (reqId && this._mediaRequests.has(reqId)) {
+      const pending = this._mediaRequests.get(reqId);
+      this._mediaRequests.delete(reqId);
+      pending?.resolve(message);
+      return;
+    }
     this.emit(TransportEvent.MESSAGE, normalizeInboundMessage(message));
   }
 
@@ -928,6 +1073,43 @@ export class WsTransport extends BaseTransport {
 
   async _scanPairing() {
     return { supported: false };
+  }
+
+  async _pickImage() {
+    // Browser debug mode has no native picker (camera/album live in the app).
+    return { ok: false, reason: 'unsupported' };
+  }
+
+  async _mediaGet(mediaId) {
+    if (!mediaId) return { ok: false, code: 3001, reason: 'unknown-media' };
+    const _reqId = `media-${++this._mediaSeq}`;
+    return new Promise((resolve) => {
+      const timer = this.scheduler.setTimeout(() => {
+        this._mediaRequests.delete(_reqId);
+        resolve({ ok: false, code: 5001, reason: 'timeout' });
+      }, 20000);
+      this._mediaRequests.set(_reqId, {
+        resolve: (message) => {
+          this.scheduler.clearTimeout(timer);
+          if (message?.type === MsgType.MEDIA_DATA) {
+            try {
+              resolve({ ok: true, media: normalizeMediaData(message) });
+            } catch (error) {
+              resolve({ ok: false, code: 3001, reason: String(error?.message ?? error) });
+            }
+          } else {
+            resolve({ ok: false, code: Number(message?.code ?? 3001), reason: message?.message ?? 'media unavailable' });
+          }
+        },
+      });
+      try {
+        this._send({ ...buildMediaGet(null, { mediaId }), _reqId });
+      } catch (error) {
+        this.scheduler.clearTimeout(timer);
+        this._mediaRequests.delete(_reqId);
+        resolve({ ok: false, code: 5001, reason: String(error?.message ?? error) });
+      }
+    });
   }
 }
 

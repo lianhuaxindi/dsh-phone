@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import time
@@ -30,9 +31,17 @@ from .dsh import (
     DshDelta,
     DshDone,
     DshError,
+    DshMeta,
     DshQuestion,
     DshTool,
     DshTurn,
+)
+from .media import (
+    ImagePayload,
+    MediaError,
+    decode_attachments,
+    load_image,
+    save_images,
 )
 from .protocol.audio import AudioFrameError, is_silent, parse_audio_frame
 from .protocol.envelope import (
@@ -69,6 +78,8 @@ from .protocol.messages import (
     Hello,
     HelloOK,
     ErrorMessage,
+    MediaData,
+    MediaGet,
     PairError,
     PairOK,
     PairRequest,
@@ -86,6 +97,7 @@ from .protocol.messages import (
     SessionHistoryOK,
     SessionList,
     SessionListOK,
+    SessionMeta,
     SessionResume,
     SessionResumeOK,
     ToolStatus,
@@ -136,6 +148,8 @@ class DeviceSession:
         self.turns: dict[str, "_TurnHandle"] = {}
         self.pending: dict[str, "_PendingInteraction"] = {}
         self.device_name = ""
+        #: 最近一次已发送的 session.meta 键（设备级去重，跨 turn 生效；D-032）。
+        self.last_session_meta: tuple[Any, ...] | None = None
 
     # -- 连接 -------------------------------------------------------------
 
@@ -209,6 +223,7 @@ class DeviceSession:
         dsh_session_id: str,
         text: str,
         assistant_message_id: str,
+        images: list[dict[str, Any]] | None = None,
     ) -> None:
         handle = _TurnHandle(
             device=self,
@@ -216,6 +231,7 @@ class DeviceSession:
             dsh_session_id=dsh_session_id,
             text=text,
             assistant_message_id=assistant_message_id,
+            images=images,
         )
         self.turns[session_id] = handle
         handle.task = asyncio.create_task(
@@ -238,7 +254,9 @@ class DeviceSession:
         finish_reason = "completed"
         accumulated: list[str] = []
         try:
-            init = self.server.dsh.start_turn(handle.dsh_session_id, handle.text)
+            init = self.server.dsh.start_turn(
+                handle.dsh_session_id, handle.text, images=handle.images
+            )
             handle.turn = init
             if handle.cancel_requested:
                 init.cancel()
@@ -254,6 +272,8 @@ class DeviceSession:
                         )
                     )
                     handle.delta_index += 1
+                elif isinstance(event, DshMeta):
+                    await self._emit_session_meta(handle, event)
                 elif isinstance(event, DshTool):
                     await self.send_event(
                         ToolStatus(
@@ -279,6 +299,7 @@ class DeviceSession:
                     )
                 elif isinstance(event, DshDone):
                     finish_reason = event.finish_reason
+                    handle.usage = event.usage
         except asyncio.CancelledError:
             finish_reason = "cancelled"
             raise
@@ -310,9 +331,30 @@ class DeviceSession:
                     session_id=handle.session_id,
                     message_id=handle.assistant_message_id,
                     finish_reason=finish_reason,
+                    usage=handle.usage,
                 )
             )
             self.turns.pop(handle.session_id, None)
+
+    async def _emit_session_meta(self, handle: "_TurnHandle", event: DshMeta) -> None:
+        """把运行时事件里的 model/context 变化转成 ``session.meta``（D-032）。"""
+        meta = SessionMeta(
+            session_id=handle.session_id,
+            provider=event.provider,
+            model=event.model,
+            reasoning_effort=event.reasoning_effort,
+            context_window=event.context_window,
+        )
+        key = (
+            meta.provider,
+            meta.model,
+            meta.reasoning_effort,
+            meta.context_window,
+        )
+        if self.last_session_meta == key:
+            return
+        self.last_session_meta = key
+        await self.send_event(meta)
 
     async def _emit_approval(self, handle: "_TurnHandle", event: DshApproval) -> None:
         deadline = int(event.deadline or (time.time() + DEFAULT_INTERACTION_DEADLINE_SEC))
@@ -443,6 +485,12 @@ class _TurnHandle:
     cancelled: bool = False
     cancel_requested: bool = False
     delta_index: int = 0
+    #: v1.1：SDK 图片内容块（已剥 base64 前由 media 层校验/落盘）。
+    images: list[dict[str, Any]] | None = None
+    #: v1.1：assistant.done.usage（来自运行时）。
+    usage: dict[str, Any] | None = None
+    #: 最近一次 session.meta 的字段元组（避免重复发送相同 meta）。
+    last_meta: tuple[Any, ...] | None = None
 
 
 @dataclass
@@ -875,6 +923,54 @@ class Connection:
         reply = SessionCreateOK(session=session.to_dict())
         reply.reply_to = envelope.seq
         await self._send(reply)
+        # PROTOCOL §9：session.create.ok 之后立即发一次 session.meta
+        await self._send_session_meta(session.session_id)
+
+    async def _send_session_meta(self, session_id: str) -> None:
+        """发送 ``session.meta``（v1.1，D-032）：模型/推理强度/上下文窗口。"""
+        if self.device is None:
+            return
+        meta = self._session_meta(session_id)
+        # 记录已发送键，后续 turn 内相同 DshMeta 不再重复发（D-032）。
+        self.device.last_session_meta = (
+            meta.provider,
+            meta.model,
+            meta.reasoning_effort,
+            meta.context_window,
+        )
+        await self.device.send_event(meta)
+
+    def _session_meta(self, session_id: str) -> SessionMeta:
+        config = self.config.dsh
+        dsh = self.server.dsh
+        base = getattr(dsh, "config", None) or config
+        provider = (
+            getattr(dsh, "provider", None)
+            or getattr(base, "provider", "")
+            or config.provider
+        )
+        model = (
+            getattr(dsh, "model", None)
+            or getattr(base, "model", "")
+            or config.model
+        )
+        effort = (
+            getattr(dsh, "reasoning_effort", None)
+            or getattr(base, "reasoning_effort", "")
+            or config.reasoning_effort
+        )
+        window = (
+            getattr(dsh, "context_window_tokens", None)
+            or getattr(base, "context_window_tokens", None)
+            or config.context_window_tokens
+        )
+        return SessionMeta(
+            session_id=session_id,
+            provider=provider or None,
+            model=model or None,
+            reasoning_effort=effort or None,
+            context_window=int(window) if window else None,
+        )
 
     async def _on_session_resume(self, message: SessionResume, envelope: Any) -> None:
         self._require_authed(envelope)
@@ -892,6 +988,8 @@ class Connection:
         )
         reply.reply_to = envelope.seq
         await self._send(reply)
+        # PROTOCOL §9：session.resume.ok 之后立即发一次 session.meta
+        await self._send_session_meta(session.session_id)
 
     async def _on_session_history(self, message: SessionHistory, envelope: Any) -> None:
         self._require_authed(envelope)
@@ -909,6 +1007,27 @@ class Connection:
         )
         reply = SessionHistoryOK(
             messages=[item.to_dict() for item in messages], has_more=has_more
+        )
+        reply.reply_to = envelope.seq
+        await self._send(reply)
+
+    async def _on_media_get(self, message: MediaGet, envelope: Any) -> None:
+        """v1.1：按 mediaId 取回原图（仅已认证；未知 id → error 3001）。"""
+        self._require_authed(envelope)
+        media_id = (message.media_id or "").strip()
+        media = load_image(self.config.state_dir / "media", media_id)
+        if media is None:
+            raise ProtocolError(
+                "media not found",
+                code=ErrorCode.SESSION_NOT_FOUND,
+                retryable=False,
+                reply_to=envelope.seq,
+            )
+        mime_type, data = media
+        reply = MediaData(
+            media_id=media_id,
+            mime_type=mime_type,
+            data=base64.b64encode(data).decode("ascii"),
         )
         reply.reply_to = envelope.seq
         await self._send(reply)
@@ -934,13 +1053,6 @@ class Connection:
                 retryable=False,
                 reply_to=envelope.seq,
             )
-        if not text.strip():
-            raise ProtocolError(
-                "empty text",
-                code=ErrorCode.MODEL_ERROR,
-                retryable=False,
-                reply_to=envelope.seq,
-            )
         client_id = message.client_id or ""
         if client_id:
             existing = self.server.history.find_by_client_id(session_id, client_id)
@@ -960,8 +1072,46 @@ class Connection:
                 retryable=True,
                 reply_to=envelope.seq,
             )
+        # v1.1 图片：magic bytes 校验 + 尺寸上限 → error 4002，且不启动 turn
+        payloads: list[ImagePayload] = []
+        if message.images:
+            try:
+                payloads = decode_attachments(message.images)
+            except MediaError as exc:
+                raise ProtocolError(
+                    f"invalid images: {exc}",
+                    code=ErrorCode.IMAGE_INVALID,
+                    retryable=False,
+                    reply_to=envelope.seq,
+                ) from exc
+        if not text.strip() and not payloads:
+            raise ProtocolError(
+                "empty text",
+                code=ErrorCode.MODEL_ERROR,
+                retryable=False,
+                reply_to=envelope.seq,
+            )
+        image_refs: list[dict[str, Any]] | None = None
+        image_blocks: list[dict[str, Any]] | None = None
+        if payloads:
+            try:
+                save_images(self.config.state_dir / "media", payloads)
+            except OSError as exc:
+                raise ProtocolError(
+                    f"failed to persist images: {exc}",
+                    code=ErrorCode.INTERNAL_ERROR,
+                    retryable=True,
+                    reply_to=envelope.seq,
+                ) from exc
+            image_refs = [payload.ref() for payload in payloads]
+            image_blocks = [payload.content_block() for payload in payloads]
         user_message = self.server.history.save_message(
-            session_id, "user", text, status="done", client_id=client_id or None
+            session_id,
+            "user",
+            text,
+            status="done",
+            client_id=client_id or None,
+            images=image_refs,
         )
         reply = ChatAck(client_id=client_id, message_id=user_message.message_id)
         reply.reply_to = envelope.seq
@@ -989,12 +1139,17 @@ class Connection:
             dsh_session_id=dsh_session_id or session_id,
             text=text,
             assistant_message_id=assistant_message.message_id,
+            images=image_blocks,
         )
         logger.info(
             "chat.send",
             extra={
                 "event": "chat.send",
-                "fields": {"sessionId": session_id, "clientId": client_id},
+                "fields": {
+                    "sessionId": session_id,
+                    "clientId": client_id,
+                    "images": len(image_refs or []),
+                },
             },
         )
 
@@ -1304,6 +1459,7 @@ _HANDLERS = {
     "session.create": Connection._on_session_create,
     "session.resume": Connection._on_session_resume,
     "session.history": Connection._on_session_history,
+    "media.get": Connection._on_media_get,
     "chat.send": Connection._on_chat_send,
     "chat.cancel": Connection._on_chat_cancel,
     "audio.start": Connection._on_audio_start,

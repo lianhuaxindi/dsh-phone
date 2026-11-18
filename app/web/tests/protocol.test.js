@@ -62,6 +62,15 @@ import {
   simpleHash,
   randomUuid,
   randomNonceBase64,
+  MEDIA,
+  buildMediaGet,
+  base64DecodedBytes,
+  validateChatImages,
+  normalizeImage,
+  normalizeImageList,
+  normalizeSessionMeta,
+  normalizeUsage,
+  normalizeMediaData,
 } from '../js/protocol.js';
 
 /* --------------------------------------------------------- PROTOCOL §6.3 vector */
@@ -378,4 +387,128 @@ test('time/text helpers are stable', () => {
   assert.notEqual(textFingerprint('hello').hashPrefix, textFingerprint('hellp').hashPrefix);
   assert.equal(simpleHash('abc'), simpleHash('abc'));
   assert.equal(utf8Bytes('手机').length, 6);
+});
+
+/* ------------------------------------------------------------ v1.1 (§8.1/§9) */
+
+const PNG_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+test('v1.1 MEDIA limits, model labels and 4002 reselect spec (D-028/D-032)', () => {
+  assert.equal(MEDIA.maxImages, 4);
+  assert.equal(MEDIA.maxImageBytes, 2 * 1024 * 1024);
+  assert.equal(MEDIA.maxTotalImageBytes, 6 * 1024 * 1024);
+  assert.equal(MEDIA.maxImageEdge, 1600);
+  assert.deepEqual(MEDIA.allowedMimeTypes, ['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
+  assert.equal(MEDIA.defaultContextWindow, 1_000_000);
+  assert.equal(MEDIA.modelLabels['deepseek-flash'], 'DeepSeek-V4.1-Flash');
+  assert.equal(MEDIA.modelLabels['deepseek-v4-pro'], 'DeepSeek-V4-Pro');
+  const spec = errorSpec(4002);
+  assert.equal(spec.retryable, false);
+  assert.equal(spec.action, RecoveryAction.RESELECT_IMAGE);
+  assert.equal(spec.i18nKey, 'error.4002');
+});
+
+test('v1.1 validateChatImages enforces count/size/mime limits', () => {
+  assert.deepEqual(validateChatImages([]), []);
+  assert.equal(validateChatImages(undefined).length, 0);
+  const one = validateChatImages([{ mimeType: 'image/png', data: PNG_BASE64 }]);
+  assert.equal(one.length, 1);
+  assert.equal(one[0].mimeType, 'image/png');
+  assert.throws(() => validateChatImages('nope'), ProtocolError);
+  assert.throws(
+    () => validateChatImages(Array.from({ length: 5 }, () => ({ mimeType: 'image/png', data: PNG_BASE64 }))),
+    /at most 4/i,
+  );
+  assert.throws(() => validateChatImages([{ mimeType: 'application/pdf', data: PNG_BASE64 }]), /mimeType|format/i);
+  assert.throws(
+    () => validateChatImages([{ mimeType: 'image/png', data: 'A'.repeat(4 * 1024 * 1024) }]),
+    /exceeds|too large|2 MiB/i,
+  );
+  assert.ok(base64DecodedBytes(PNG_BASE64) > 0);
+});
+
+test('v1.1 chat.send accepts images and media.get builder works', () => {
+  const counter = new SeqCounter();
+  const images = [{ mimeType: 'image/png', data: PNG_BASE64, name: 'demo.png', width: 1, height: 1 }];
+  const withImage = buildChatSend(counter, { sessionId: 's1', clientId: 'c1', text: '', images });
+  assert.equal(withImage.text, '');
+  assert.equal(withImage.images.length, 1);
+  assert.equal(withImage.seq, 1);
+  assert.equal(counter.next(), 2);
+  assert.throws(() => buildChatSend(counter, { sessionId: 's1', text: '' }), /empty|required/i);
+  const both = buildChatSend(counter, { sessionId: 's1', text: 'hi', images });
+  assert.equal(both.text, 'hi');
+  assert.equal(both.images.length, 1);
+  const media = buildMediaGet(counter, { mediaId: 'md-1' });
+  assert.equal(media.type, MsgType.MEDIA_GET);
+  assert.equal(media.mediaId, 'md-1');
+});
+
+test('v1.1 session.meta and usage normalizers are lenient about missing keys', () => {
+  const meta = normalizeSessionMeta({
+    sessionId: 's1',
+    provider: 'deepseek-official',
+    model: 'deepseek-flash',
+    reasoningEffort: 'HIGH',
+    contextWindow: 1000000,
+  });
+  assert.equal(meta.reasoningEffort, 'high');
+  assert.equal(meta.contextWindow, 1000000);
+  const sparse = normalizeSessionMeta({ sessionId: 's1' });
+  assert.equal(sparse.model, undefined);
+  assert.throws(() => normalizeSessionMeta({}), ProtocolError);
+
+  const usage = normalizeUsage({
+    inputTokens: 1000,
+    outputTokens: 200,
+    cacheReadTokens: 100,
+    reasoningTokens: 50,
+    contextWindow: 1000000,
+  });
+  assert.equal(usage.usedTokens, 1200, 'usedTokens falls back to input+output');
+  assert.equal(usage.totalTokens, undefined, 'absent totalTokens is not fabricated');
+  assert.equal(usage.contextWindow, 1000000);
+  const partial = normalizeUsage({ inputTokens: 10, outputTokens: 5 });
+  assert.equal(partial.usedTokens, 15);
+  assert.equal(normalizeUsage({}), null);
+  assert.equal(normalizeUsage(null), null);
+});
+
+test('v1.1 Message.images metadata is user-only and media.data validates base64', () => {
+  const withImage = normalizeMessage({
+    messageId: 'm1',
+    sessionId: 's1',
+    role: 'user',
+    text: 'hi',
+    images: [{ mediaId: 'md-1', mimeType: 'image/png', width: 10, height: 20, sizeBytes: 30 }],
+  });
+  assert.equal(withImage.images.length, 1);
+  assert.equal(withImage.images[0].width, 10);
+  const assistant = normalizeMessage({ messageId: 'm2', sessionId: 's1', role: 'assistant', text: 'x', images: [{ mediaId: 'md-1' }] });
+  assert.equal(assistant.images, undefined, 'only user messages carry images (PROTOCOL §8.1)');
+  assert.equal(normalizeImage({ mediaId: 'md-1' }).width, 0);
+  assert.equal(normalizeImageList([{ mediaId: 'md-1' }, { nope: true }]).length, 1);
+  const media = normalizeMediaData({ mediaId: 'md-1', mimeType: 'image/png', data: PNG_BASE64 });
+  assert.equal(media.mediaId, 'md-1');
+  assert.throws(() => normalizeMediaData({ mediaId: 'md-1', data: 'not base64!!' }), ProtocolError);
+});
+
+test('v1.1 pairing QR URI carries hosts[] and name (PROTOCOL §5.1/D-031)', () => {
+  const uri = buildPairUri({
+    host: '192.168.1.10',
+    port: 8765,
+    fp: 'a'.repeat(64),
+    code: '123456',
+    sid: 'srv-1',
+    hosts: ['10.5.19.39', '192.168.1.10'],
+    name: 'KQ-PC',
+  });
+  const parsed = parsePairUri(uri);
+  assert.equal(parsed.host, '192.168.1.10');
+  assert.deepEqual(parsed.hosts, ['10.5.19.39', '192.168.1.10']);
+  assert.equal(parsed.name, 'KQ-PC');
+  const plain = parsePairUri(`dsphone://pair?v=1&host=192.168.1.10&port=8765&fp=${'a'.repeat(64)}&code=123456&sid=srv-1`);
+  assert.deepEqual(plain.hosts, []);
+  assert.equal(plain.name, null);
 });

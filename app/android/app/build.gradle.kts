@@ -4,8 +4,9 @@ plugins {
 }
 
 // CI 注入版本（ci/version.json）：gradle ... -Pdsphone.versionName=0.2.0 -Pdsphone.versionCode=7
-val dsphoneVersionName: String = (findProperty("dsphone.versionName") as String?) ?: "1.0.0"
-val dsphoneVersionCode: Int = ((findProperty("dsphone.versionCode") as String?) ?: "1").toIntOrNull() ?: 1
+// v1.1 默认版本（D-033）：versionName 1.1.0 / versionCode 10100，仍可被 -P 覆盖。
+val dsphoneVersionName: String = (findProperty("dsphone.versionName") as String?) ?: "1.1.0"
+val dsphoneVersionCode: Int = ((findProperty("dsphone.versionCode") as String?) ?: "10100").toIntOrNull() ?: 10100
 
 android {
     namespace = "com.dsh.phone"
@@ -64,8 +65,10 @@ android {
 }
 
 dependencies {
-    // 唯一运行时依赖：WSS 客户端（java.net.http 在 Android 上不可用，只能 OkHttp）。
+    // 唯一网络运行时依赖：WSS 客户端（java.net.http 在 Android 上不可用，只能 OkHttp）。
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // v1.1 扫码配对：ZXing core 纯本地解码（~0.5MB，无 GMS、无联网），D-030。
+    implementation("com.google.zxing:core:3.5.3")
     // JVM 单元测试（帧头、鉴权、退避、协议 JSON、脱敏等纯逻辑）。
     testImplementation("junit:junit:4.13.2")
 }

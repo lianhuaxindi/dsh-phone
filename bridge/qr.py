@@ -234,3 +234,42 @@ def save_png(
         return path
     except Exception:  # pragma: no cover - PIL 缺失或保存失败
         return None
+
+
+def save_qr_png(
+    data: str,
+    path: str | Path,
+    *,
+    min_size: int = 512,
+    border: int = 4,
+    max_box_size: int = 160,
+) -> str | None:
+    """把二维码保存为 PNG，并保证每边 ≥ ``min_size`` 像素（PROTOCOL §5.1）。
+
+    返回 PNG 的绝对路径；``qrcode``/Pillow 缺失或保存失败时返回 ``None``。
+    """
+    if not QRCODE_AVAILABLE:
+        return None
+    try:  # pragma: no cover - 可选功能
+        from qrcode.image.pil import PilImage  # type: ignore[import-not-found]
+
+        target = Path(path).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        probe = qrcode.QRCode(
+            error_correction=ERROR_CORRECT_M, box_size=1, border=border
+        )
+        probe.add_data(data)
+        probe.make(fit=True)
+        modules = int(probe.modules_count) + 2 * border
+        box_size = max(12, -(-min_size // max(modules, 1)))
+        box_size = min(box_size, max_box_size)
+        qr = qrcode.QRCode(
+            error_correction=ERROR_CORRECT_M, box_size=box_size, border=border
+        )
+        qr.add_data(data)
+        qr.make(fit=True)
+        image: Any = qr.make_image(image_factory=PilImage)
+        image.save(target)
+        return str(target.resolve())
+    except Exception:  # pragma: no cover - PIL 缺失或保存失败
+        return None

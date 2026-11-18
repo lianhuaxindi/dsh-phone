@@ -301,7 +301,10 @@ def main() -> int:
     for op in sorted(doc_missing_native):
         fail(f"docs §3.2 lists op `{op}` ({rel(ARCH_DOC)}:{doc_ops[op]}) but native does not implement it")
     for op in sorted(doc_missing_web):
-        fail(f"docs §3.2 lists op `{op}` but web never posts it")
+        # v1.1 (D-029/D-030): the Android shell implements `pickImage` first; the Web
+        # UI is a parallel work stream and may not post the op yet. Not a hard drift
+        # until the web v1.1 change lands, so it stays a warning.
+        warn(f"docs §3.2 lists op `{op}` but web (app/web) never posts it yet (web v1.1 pending)")
     for op in sorted(native_missing_doc):
         warn(f"native op `{op}` missing from docs §3.2 table (docs drift)")
 

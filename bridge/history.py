@@ -8,13 +8,16 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import secrets
 import sqlite3
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
+from .media import parse_refs
 from .protocol.messages import ChatMessage, Session
 
 logger = logging.getLogger("bridge.history")
@@ -43,7 +46,8 @@ CREATE TABLE IF NOT EXISTS messages (
     text       TEXT NOT NULL DEFAULT '',
     status     TEXT NOT NULL DEFAULT 'done',
     created_at INTEGER NOT NULL DEFAULT 0,
-    client_id  TEXT
+    client_id  TEXT,
+    images     TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session_seq
@@ -88,7 +92,21 @@ class HistoryStore:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """v1.1：旧库补 ``messages.images`` 列（向后兼容，D-033）。"""
+        columns = {
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(messages)").fetchall()
+        }
+        if "images" not in columns:
+            self._conn.execute(
+                "ALTER TABLE messages ADD COLUMN images TEXT NOT NULL DEFAULT ''"
+            )
+            logger.info("history.migrated", extra={"event": "history.migrated",
+                                                   "fields": {"column": "messages.images"}})
 
     def close(self) -> None:
         with self._lock:
@@ -226,6 +244,7 @@ class HistoryStore:
     # ------------------------------------------------------------------
 
     def _row_to_message(self, row: sqlite3.Row) -> ChatMessage:
+        keys = row.keys()
         return ChatMessage(
             message_id=row["message_id"],
             session_id=row["session_id"],
@@ -233,6 +252,7 @@ class HistoryStore:
             text=row["text"] or "",
             status=row["status"] or "done",
             created_at=int(row["created_at"] or 0),
+            images=parse_refs(row["images"]) if "images" in keys else None,
         )
 
     def save_message(
@@ -246,20 +266,30 @@ class HistoryStore:
         client_id: str | None = None,
         created_at: int | None = None,
         update_preview: bool = True,
+        images: list[dict[str, Any]] | None = None,
     ) -> ChatMessage:
         """插入或更新一条消息（``message_id`` 已存在则更新文本/状态）。"""
         mid = message_id or _new_message_id()
         ts = int(time.time()) if created_at is None else int(created_at)
+        images_json = (
+            json.dumps(images, ensure_ascii=False, separators=(",", ":")) if images else ""
+        )
         with self._lock:
             self._conn.execute(
                 """
-                INSERT INTO messages (message_id, session_id, role, text, status, created_at, client_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO messages
+                    (message_id, session_id, role, text, status, created_at, client_id, images)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(message_id) DO UPDATE SET
                     text = excluded.text,
-                    status = excluded.status
+                    status = excluded.status,
+                    images = CASE
+                        WHEN excluded.images != '' THEN excluded.images
+                        ELSE messages.images
+                    END
                 """,
-                (mid, session_id, role, text or "", status or "done", ts, client_id),
+                (mid, session_id, role, text or "", status or "done", ts, client_id,
+                 images_json),
             )
             if client_id:
                 self._conn.execute(
@@ -278,6 +308,7 @@ class HistoryStore:
             text=text or "",
             status=status or "done",
             created_at=ts,
+            images=images or None,
         )
 
     def append_message(
@@ -290,6 +321,7 @@ class HistoryStore:
         message_id: str | None = None,
         client_id: str | None = None,
         created_at: int | None = None,
+        images: list[dict[str, Any]] | None = None,
     ) -> ChatMessage:
         """追加一条消息（``save_message`` 的别名，语义更直观）。"""
         return self.save_message(
@@ -300,6 +332,7 @@ class HistoryStore:
             message_id=message_id,
             client_id=client_id,
             created_at=created_at,
+            images=images,
         )
 
     def update_message(
@@ -308,6 +341,7 @@ class HistoryStore:
         *,
         text: str | None = None,
         status: str | None = None,
+        images: list[dict[str, Any]] | None = None,
     ) -> ChatMessage | None:
         sets: list[str] = []
         values: list[object] = []
@@ -317,6 +351,11 @@ class HistoryStore:
         if status is not None:
             sets.append("status = ?")
             values.append(status)
+        if images is not None:
+            sets.append("images = ?")
+            values.append(
+                json.dumps(images, ensure_ascii=False, separators=(",", ":"))
+            )
         if not sets:
             return self.get_message(message_id)
         values.append(message_id)

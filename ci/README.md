@@ -1,7 +1,14 @@
-# CI 流水线与本地构建脚本（M4）
+# CI 流水线与本地构建脚本（M4；v1.1 更新）
 
 本目录负责 dsh-phone 的持续集成：bridge Python 测试、WebView 前端测试、Android debug APK 构建、仓库密钥扫描。
-**Android 构建只在本机之外的 GitHub Actions 跑**（DECISIONS D-006：开发机没有 JDK / Android SDK）。
+当前版本 **1.1.0 / versionCode 10100**（`ci/version.json`，DECISIONS D-033）。
+
+> **GitHub Actions 现状（D-026）**：仓库已公开，但账号级 billing lock 导致所有 run `startup_failure`
+> （annotation：`The job was not started because your account is locked due to a billing issue.`），
+> 与 workflow YAML 无关；需用户在 GitHub `Settings → Billing` 处理。
+> **解锁前唯一 CI 路径是本地 `ci\run_tests.ps1`**；`.github/workflows/ci.yml` 保留，Billing 恢复后
+> `workflow_dispatch` 即可用。本机已按 D-027 自建 Android 工具链（`.tools/android`：JDK17 + SDK + Gradle 8.9），
+> 可本地出 debug APK，见 `app/android/BUILD-LOCAL.md`。
 
 ## 1. 目录与文件
 
@@ -12,8 +19,8 @@
 | `ci/bump_version.ps1` | 版本号递增 / 显式设置（默认 dry-run，`-Write` 才落盘） |
 | `ci/check_workflow.py` | 本仓库 CI 配置自检（YAML 结构、job 关键步骤、版本规则、.gitignore、模块输入就绪度） |
 | `ci/secrets_scan.py` | 密钥 / 敏感文件扫描（CI 的 secrets-scan job 与本地共用） |
-| `ci/run_tests.ps1` | 本地一键跑 CI 能跑的部分（配置自检 + bridge + web + sync 一致性 + Android 4 个离线自检） |
-| `ci/build_apk.ps1` | 本机有 JDK17 + Android SDK 时才可用；调 sync_web + gradle assembleDebug 并把 APK 拷到 `dist/` |
+| `ci/run_tests.ps1` | 本地一键回归（配置自检 + bridge + web + sync 一致性 + Android 4 个离线自检 + `e2e_phone_sim.py --asr fake`），每步打印 PASS/FAIL/SKIP 与耗时；E2E 默认 SKIP，`-WithE2E` 才真跑 |
+| `ci/build_apk.ps1` | 有 JDK17 + Android SDK 时可用（D-027 自建 `.tools/android` 也算）；调 sync_web + gradle assembleDebug 并把 APK 拷到 `dist/` |
 | `scripts/sync_web.ps1` / `scripts/sync_web.sh` | 把 `app/web/` 同步到 Android assets（clean 同步，幂等），Linux CI 用 .sh |
 
 ## 2. GitHub Actions（`.github/workflows/ci.yml`）
@@ -32,15 +39,17 @@
 - 仓库**不提交** `gradle/wrapper/gradle-wrapper.jar` 与 `gradlew`，由 CI 的 `gradle wrapper --gradle-version <解析值>` 生成（已被 .gitignore 忽略）。
 - CI 环境变量：`PYTHONUTF8=1`、`PYTHONIOENCODING=utf-8`（Windows runner 中文输出不乱码）。
 - debug APK 由 AGP 默认 debug keystore 自动签名；release 签名走 GitHub Secrets（PRD §16 / D-004 侧载分发）。
+- **Actions 现状（D-026）**：billing lock 未解除前 job 根本不会启动（`startup_failure`）；解锁前请用本地 `ci\run_tests.ps1` + `ci\build_apk.ps1` 做回归/出包。
 
 ## 3. 版本号规则（`ci/version.json`）
 
 ```json
-{ "schemaVersion": 1, "versionName": "1.0.0", "versionCode": 10000,
+{ "schemaVersion": 1, "versionName": "1.1.0", "versionCode": 10100,
   "protocolVersion": "1", "minSdk": 29, "targetSdk": 35 }
 ```
 
-- `versionName` 必须是 semver（`major.minor.patch`），对用户在「设置-关于」中展示为 `1.0.0+<versionCode>`。
+- 当前版本：**1.1.0 / versionCode 10100**（D-033；v1.1 为向后兼容增量，子协议仍是 `dsphone.v1`）。
+- `versionName` 必须是 semver（`major.minor.patch`），对用户在「设置-关于」中展示为 `<versionName>+<versionCode>`（如 `1.1.0+10100`）。
 - `versionCode` 公式：`major*10000 + minor*100 + patch`，且**必须严格递增**（取 `max(公式值, 旧值+1)`，永不回退）。
 - CI 在构建前校验 `versionCode >= 公式值`，不满足直接失败；`protocolVersion` / `minSdk` / `targetSdk` 也参与自检。
 - 递增：`powershell -NoProfile -ExecutionPolicy Bypass -File ci\bump_version.ps1 -Part patch|minor|major|code -Write`
@@ -60,9 +69,16 @@ CI job 名里的版本从 `ci/version.json` 来，因此 bump 版本后无需改
 > `powershell -NoProfile -ExecutionPolicy Bypass -File <script>`（本仓库所有本地命令都按此写法）。
 
 ```powershell
-# 一键本地检查（默认 strict：缺模块即失败；只跑已就绪部分用 -AllowMissing）
+# 一键本地回归（默认 strict：缺模块即失败；只跑已就绪部分用 -AllowMissing）
+# 覆盖：CI 配置自检、bridge pytest、web node tests、sync_web -VerifyOnly、Android 4 个离线自检；
+#       每步打印 PASS/FAIL/SKIP 与耗时；E2E 默认 SKIP（加 -WithE2E 才真跑）
 powershell -NoProfile -ExecutionPolicy Bypass -File ci\run_tests.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File ci\run_tests.ps1 -AllowMissing
+
+# 端到端模拟（默认 SKIP；加 -WithE2E 真跑，fake ASR 约 20-30s）
+powershell -NoProfile -ExecutionPolicy Bypass -File ci\run_tests.ps1 -AllowMissing -WithE2E
+# 也可单独跑（CI/无模型最小依赖；成功输出末行 E2E_PHONE_SIM: PASS (21 checks)）
+D:\anaconda3\envs\scisim-agent\python.exe scripts\e2e_phone_sim.py --asr fake
 
 # CI 配置自检（需要 pyyaml；本机 python 在 D:\anaconda3\envs\scisim-agent\python.exe）
 D:\anaconda3\envs\scisim-agent\python.exe ci\check_workflow.py --strict
@@ -91,21 +107,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ci\bump_version.ps1 -Part pa
 
 ### Android 本地构建
 
-本机（D-006）没有 JDK / Android SDK，`ci\build_apk.ps1` 会直接以中文提示退出（exit 2）。需要 JDK17 + Android SDK 的机器上：
+#### A. 自建工具链（D-027，本机已就绪，推荐）
+
+`.tools/android`（JDK17 Temurin + Android SDK + Gradle 8.9）已由 android-shell 装好；环境变量与可复制命令见
+`app/android/BUILD-LOCAL.md`。设好 `JAVA_HOME` / `ANDROID_HOME` 后：
 
 ```powershell
-$env:ANDROID_HOME = 'C:\Android\Sdk'   # 或 ANDROID_SDK_ROOT
 powershell -NoProfile -ExecutionPolicy Bypass -File ci\build_apk.ps1
 # 产物：app/android/app/build/outputs/apk/debug/app-debug.apk
 #       另复制一份到 dist/dsphone-<versionName>-<versionCode>-debug.apk
 ```
 
-CI 产物：Actions run 的 Artifacts 里下载 `app-debug-<versionName>-<versionCode>`。
+#### B. GitHub Actions（D-026 解锁后）
+
+Actions run 的 Artifacts 里下载 `app-debug-<versionName>-<versionCode>`。
 
 ## 5. sync_web 规则
 
 - 源：`app/web/`；目标：`app/android/app/src/main/assets/web/`（WebView 用 `file:///android_asset/web/index.html`）。
-- 排除：`tests/`、`node_modules/`、`*.md`（任意路径的 Markdown 文档，如 README.md / ACCEPTANCE.md）、`package.json`（仅给 `node --test` 识别 ESM 用的前端工具文件，运行时不需要）。
+- 排除：`tests/`、`node_modules/`、`*.md`（任意路径的 Markdown 文档，如 README.md / ACCEPTANCE.md）、`package.json`（仅给 `node --test` 识别 ESM 用的前端工具文件，运行时不需要）、`*.tmp`（编辑器原子写残留；并发编辑时可能在同步过程中消失，故同步会跳过且对消失文件只 WARN）。
 - clean 同步：复制新增/变更文件 → 删除目标里多余文件 → 清理空目录；二次运行只打印「未变 N」，幂等。
 - 目标目录被 `.gitignore` 忽略，仓库不提交；CI 在 assembleDebug 前用 bash 版同步，本地用 PowerShell 版。
 - 源目录缺 `index.html` 或目标缺 `app/android` 时给出明确中文报错并 exit 1。
@@ -123,15 +143,17 @@ CI 产物：Actions run 的 Artifacts 里下载 `app-debug-<versionName>-<versio
   digest 上下文（行含 `sha256/sha1/md5/checksum/digest/hash`、裸 64hex 常量、`models.py` 等清单文件）不误报；脚本自身豁免。
 - 输出会把命中的敏感片段遮蔽（masked）；有 BLOCK 时 exit 1，用法/基线错误 exit 2。CI 的 secrets-scan job 红即表示需要处理。
 
-## 7. 已知本地环境限制（DSH 沙箱 / D-006）
+## 7. 已知本地环境限制（DSH 沙箱 / D-006 / D-027）
 
 | 现象 | 原因 | 本地对策 |
 | --- | --- | --- |
-| `ci\build_apk.ps1` exit 2 | 本机无 JDK/Android SDK（D-006） | 只能等 CI 出 APK |
+| Actions 所有 run `startup_failure` | 账号级 billing lock（D-026） | 用户处理 GitHub Billing；解锁前用本地 `run_tests.ps1` + `build_apk.ps1` |
+| `ci\build_apk.ps1` exit 2 | 当前 shell 未设 `JAVA_HOME` / `ANDROID_HOME`（D-006；D-027 已提供自建工具链） | 按 `app/android/BUILD-LOCAL.md` 用 `.tools/android` 设环境变量后出包 |
 | `node --test app/web/tests` → `Error: spawn EPERM` | 沙箱禁止子进程/命名管道，node test runner 需 spawn | `node app/web/tests/protocol.test.js` 逐文件直接跑（`run_tests.ps1` 已自动回退） |
 | pytest `tmp_path` → `PermissionError WinError 5` | 沙箱临时目录 ACL | 加 `--basetemp=ci\_tmp -p no:cacheprovider`（CI 无此问题） |
 | `bash` 不可用 / Git Bash `couldn't create signal pipe` | 沙箱限制 | `scripts/sync_web.sh` 只能靠 CI（ubuntu）验证，本地用 .ps1 等价验证 |
 | 直接 `& script.ps1` 被拒 | PowerShell 执行策略 | 用 `powershell -NoProfile -ExecutionPolicy Bypass -File` |
+| Gradle `testDebugUnitTest` fork worker 报 `GradleWorkerMain` / 管道关闭 | 沙箱禁止子进程管道（D-027） | 直连 JUnit4 跑已编译测试类，或把仓库复制到纯 ASCII 临时目录跑（见 D-027/BUILD-LOCAL.md） |
 
 ## 8. 排障分工
 
@@ -141,6 +163,8 @@ CI 产物：Actions run 的 Artifacts 里下载 `app-debug-<versionName>-<versio
 | `web-tests` | `node --test` 失败 | web-ui |
 | `android-build` | Gradle/Kotlin/AGP/SDK 报错（CI 失败时会打印 SDK 与 build output）；若 4 个离线自检之一失败，看对应脚本输出 | android-shell（把完整报错贴给它） |
 | `secrets-scan` | `ci/secrets_scan.py` 输出 | 引入密钥/文件的模块 |
+| 本地 `run_tests.ps1` 的 E2E 步（`-WithE2E`） | `scripts/e2e_phone_sim.py --asr fake` 输出 | bridge-core（Bridge/协议/ASR 行为） |
 | workflow 结构本身 | `python ci/check_workflow.py --strict` | ci-build（本目录） |
 
-新增/修改 CI 步骤后务必跑一次 `python ci\check_workflow.py --strict`，确保关键 job、矩阵、版本规则与 .gitignore 没被改坏。
+新增/修改 CI 步骤后务必跑一次 `python ci\check_workflow.py --strict`，确保关键 job、矩阵、版本规则与 .gitignore 没被改坏；
+v1.1 起本地回归请优先跑 `ci\run_tests.ps1 -AllowMissing`（加 `-WithE2E` 连端到端模拟一起验）。

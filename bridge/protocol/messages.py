@@ -171,9 +171,11 @@ class ChatMessage:
     text: str = ""
     status: str = "done"
     created_at: int = 0
+    #: v1.1：仅 user 消息可能带图片元数据（不含 base64）。
+    images: list[dict[str, Any]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "messageId": self.message_id,
             "sessionId": self.session_id,
             "role": self.role,
@@ -181,9 +183,13 @@ class ChatMessage:
             "status": self.status,
             "createdAt": int(self.created_at),
         }
+        if self.images is not None:
+            out["images"] = [dict(item) for item in self.images]
+        return out
 
     @classmethod
     def from_dict(cls, obj: dict[str, Any]) -> "ChatMessage":
+        images = obj.get("images")
         return cls(
             message_id=str(obj.get("messageId", "")),
             session_id=str(obj.get("sessionId", "")),
@@ -191,6 +197,7 @@ class ChatMessage:
             text=str(obj.get("text", "")),
             status=str(obj.get("status", "done")),
             created_at=int(obj.get("createdAt", 0)),
+            images=[dict(item) for item in images] if isinstance(images, list) else None,
         )
 
 
@@ -271,6 +278,8 @@ class ChatSend(Message):
     client_id: str = ""
     session_id: str = ""
     text: str = ""
+    #: v1.1：可选图片附件（base64 data URI 内容块，见 PROTOCOL §9）。
+    images: list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -309,6 +318,14 @@ class QuestionResponse(Message):
     id: str = ""
     cancelled: bool = False
     answers: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class MediaGet(Message):
+    """v1.1：按 ``mediaId`` 拉取原图（已认证连接可用）。"""
+
+    type: ClassVar[str] = "media.get"
+    media_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +427,29 @@ class SessionHistoryOK(Message):
 
 
 @dataclass
+class SessionMeta(Message):
+    """v1.1：会话运行时元信息（无 replyTo，可被 resync 重放）。"""
+
+    type: ClassVar[str] = "session.meta"
+    session_id: str = ""
+    provider: str | None = None
+    model: str | None = None
+    reasoning_effort: str | None = None
+    context_window: int | None = None
+
+
+@dataclass
+class MediaData(Message):
+    """v1.1：原图响应（base64；单次 ≤2MiB）。"""
+
+    type: ClassVar[str] = "media.data"
+    reply_required: ClassVar[bool] = True
+    media_id: str = ""
+    mime_type: str = ""
+    data: str = ""
+
+
+@dataclass
 class ChatAck(Message):
     type: ClassVar[str] = "chat.ack"
     reply_required: ClassVar[bool] = True
@@ -442,6 +482,8 @@ class AssistantDone(Message):
     session_id: str = ""
     message_id: str = ""
     finish_reason: str = "completed"
+    #: v1.1：token 用量（缺失省略，见 PROTOCOL §9）。
+    usage: dict[str, Any] | None = None
 
 
 @dataclass
@@ -543,6 +585,7 @@ C2S_MESSAGES: tuple[type[Message], ...] = (
     AudioStop,
     ApprovalResponse,
     QuestionResponse,
+    MediaGet,
 )
 
 S2C_MESSAGES: tuple[type[Message], ...] = (
@@ -557,6 +600,8 @@ S2C_MESSAGES: tuple[type[Message], ...] = (
     SessionCreateOK,
     SessionResumeOK,
     SessionHistoryOK,
+    SessionMeta,
+    MediaData,
     ChatAck,
     AssistantDelta,
     ToolStatus,

@@ -52,7 +52,7 @@ test('TC-WEB-04 too-long input is rejected with guidance; send is disabled while
   assert.match(chat, /text\.length > 32000/);
   assert.match(chat, /chat\.tooLong/);
   assert.match(chat, /_syncSendState/);
-  assert.match(chat, /this\.sendButton\.disabled = empty \|\| Boolean\(this\.textarea\.disabled\)/);
+  assert.match(chat, /this\.sendButton\.disabled = \(empty && !hasImages\) \|\| Boolean\(this\.textarea\.disabled\)/);
   const controller = source('js/controller.js');
   assert.match(controller, /chat\.tooLong/);
   assert.match(controller, /PROTOCOL\.maxTextChars/);
@@ -189,4 +189,110 @@ test('PRD §12: touch targets, system dark/light, reduced motion, bluetooth stat
   const i18n = source('js/i18n.js');
   assert.match(i18n, /const en = \{/);
   assert.match(i18n, /const zh = \{/);
+});
+
+/* ------------------------------------------------------------------------ */
+/* v1.1 acceptance (task-12): DeepSeek-style shell, top bar, images, QR scan */
+/* ------------------------------------------------------------------------ */
+
+test('v1.1 TC-14 top bar shows model / thinking / context from session.meta + usage (D-032)', () => {
+  const chat = source('js/views/chat.js');
+  assert.match(chat, /_renderChatMeta/);
+  assert.match(chat, /chip--model/);
+  assert.match(chat, /chip--reasoning/);
+  assert.match(chat, /chat__context-fill/);
+  assert.match(chat, /chat\.thinkingLow/);
+  assert.match(chat, /chat\.contextEstimated/);
+  assert.match(chat, /formatTokenCount/);
+
+  const protocol = source('js/protocol.js');
+  assert.match(protocol, /'deepseek-flash': 'DeepSeek-V4.1-Flash'/);
+  assert.match(protocol, /'deepseek-v4-pro': 'DeepSeek-V4-Pro'/);
+  assert.match(protocol, /defaultContextWindow: 1000000/);
+  assert.match(protocol, /export function normalizeSessionMeta/);
+  assert.match(protocol, /export function normalizeUsage/);
+
+  const controller = source('js/controller.js');
+  assert.match(controller, /chatMetaFor\(sessionId\)/);
+  assert.match(controller, /CHAT_META/);
+  assert.match(controller, /_onAssistantDone/);
+  assert.match(controller, /this\._sessionUsage\.set/);
+});
+
+test('v1.1 TC-15 images: pickImage op, attachments, chat.send.images, media.get cache (D-029)', () => {
+  const transport = source('js/transport.js');
+  assert.match(transport, /pickImage/);
+  assert.match(transport, /image\.picked/);
+  assert.match(transport, /image\.pickFailed/);
+  assert.match(transport, /_mediaGet/);
+  assert.match(transport, /buildMediaGet/);
+  const controller = source('js/controller.js');
+  assert.match(controller, /async attachImage/);
+  assert.match(controller, /async loadMedia/);
+  assert.match(controller, /_rollbackTurnImages/);
+  assert.match(controller, /validateChatImages/);
+  const chat = source('js/views/chat.js');
+  assert.match(chat, /chat__attach/);
+  assert.match(chat, /chat__camera/);
+  assert.match(chat, /_renderPendingImages/);
+  assert.match(chat, /message__images/);
+  assert.match(chat, /_renderImages/);
+  const protocol = source('js/protocol.js');
+  assert.match(protocol, /export function validateChatImages/);
+  assert.match(protocol, /IMAGE_INVALID/);
+  assert.match(protocol, /RESELECT_IMAGE/);
+  assert.ok(hasKey('error.4002.title'));
+  assert.ok(hasKey('error.4002.next'));
+});
+
+test('v1.1 TC-16 QR pairing: scanPairing.result fills the form and lists hosts (D-030)', () => {
+  const pairing = source('js/views/pairing.js');
+  assert.match(pairing, /_applyScanResult/);
+  assert.match(pairing, /pairing\.scanSuccess/);
+  assert.match(pairing, /pairing\.hostsHint/);
+  assert.match(pairing, /scannedHosts/);
+  assert.match(pairing, /pairing\.triedItem/);
+  const transport = source('js/transport.js');
+  assert.match(transport, /scanPairing\.result/);
+  assert.match(transport, /hosts: Array\.isArray\(payload\.hosts\)/);
+  assert.doesNotMatch(transport, /case 'scan\.result'/);
+  const controller = source('js/controller.js');
+  assert.match(controller, /_connectOptions\(\)/);
+  assert.match(controller, /hosts: \[\.\.\.this\._connectHosts\]/);
+  const protocol = source('js/protocol.js');
+  assert.match(protocol, /export function parsePairUri/);
+  assert.match(protocol, /hosts/);
+});
+
+test('v1.1 TC-17 mock demo can show scan → image → meta/usage offline', async () => {
+  const mock = await import('../js/mock.js');
+  assert.equal(mock.MOCK_SCAN_RESULT.ok, true);
+  assert.ok(mock.MOCK_SCAN_RESULT.hosts.length >= 1);
+  assert.match(mock.MOCK_SAMPLE_IMAGES.gallery.data, /^iVBORw0KGgo/);
+  assert.match(mock.MOCK_SAMPLE_IMAGES.camera.data, /^iVBORw0KGgo/);
+  assert.equal(mock.MOCK_SESSION_META.default.model, 'deepseek-flash');
+  assert.equal(mock.MOCK_SESSION_META.pro.model, 'deepseek-v4-pro');
+  assert.ok(mock.MOCK_LATENCY.scan > 0);
+  assert.ok(mock.MOCK_LATENCY.pick > 0);
+  assert.ok(mock.MOCK_LATENCY.media > 0);
+
+  const transportSource = source('js/transport.js');
+  assert.match(transportSource, /image\.picked/);
+  assert.match(transportSource, /scanPairing\.result/);
+});
+
+test('v1.1 TC-18 all-addresses-failed shows tried address diagnostics (D-031/D-034)', () => {
+  const controller = source('js/controller.js');
+  assert.match(controller, /connectDiagnostics/);
+  assert.match(controller, /all_addresses_failed/);
+  assert.match(controller, /tried: detail\.tried/);
+  const diagnostics = source('js/views/diagnostics.js');
+  assert.match(diagnostics, /connectDiagList/);
+  assert.match(diagnostics, /diagnostics\.connectDiagTitle/);
+  assert.match(diagnostics, /connectDiagnostics\?\.tried/);
+  const i18n = source('js/i18n.js');
+  assert.match(i18n, /'diagnostics\.connectDiagTitle'/);
+  assert.match(i18n, /'diagnostics\.connectDiagNone'/);
+  const transport = source('js/transport.js');
+  assert.match(transport, /error: TransportState\.FAILED/);
 });

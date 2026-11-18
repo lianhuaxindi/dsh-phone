@@ -1346,3 +1346,344 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* ==========================================================================
+   v1.1 DeepSeek-inspired redesign (D-032)
+   Accent #4D6BFE, rounded bubbles, chat top bar (model / thinking / context),
+   attachment buttons and message image grid, sessions drawer.
+   ========================================================================== */
+
+[hidden] {
+  display: none !important;
+}
+
+/* Rounded bubbles: user messages get the DeepSeek blue pill; assistant text
+   sits directly on the background without a box. */
+.message {
+  max-width: min(92%, 560px);
+}
+
+.message__body {
+  border-radius: 18px;
+  padding: 10px 14px;
+}
+
+.message--user .message__body {
+  border-bottom-right-radius: 6px;
+  background: var(--user-bubble);
+  color: var(--user-bubble-text);
+}
+
+.message--user .message__body a {
+  color: var(--user-bubble-text);
+}
+
+.message--assistant .message__body {
+  padding: 2px 2px 4px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.message--tool .message__body,
+.message--system .message__body {
+  border-radius: 12px;
+  box-shadow: none;
+  font-size: 0.84rem;
+}
+
+.message__actions {
+  opacity: 0.55;
+}
+
+.message--user .message__role {
+  color: var(--text-faint);
+}
+
+/* ---------------------------------------------------- chat top bar (D-032) */
+
+.chat__header {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-1);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.chat__header-main {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.chat__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding-left: 44px;
+}
+
+.chip--model {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.chip--reasoning {
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+
+.chat__context {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: 0.7rem;
+}
+
+.chat__context-bar {
+  position: relative;
+  width: 56px;
+  height: 5px;
+  overflow: hidden;
+  border-radius: var(--radius-full);
+  background: var(--bg-sunken);
+}
+
+.chat__context-fill {
+  display: block;
+  height: 100%;
+  width: 0%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width var(--transition-fast);
+}
+
+.chat__context-label {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------- composer attachments */
+
+.chat__attach,
+.chat__camera {
+  flex: 0 0 auto;
+  width: var(--touch);
+  height: var(--touch);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg-elevated);
+  font-size: 1.05rem;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.chat__attach:active,
+.chat__camera:active {
+  background: var(--bg-hover);
+}
+
+.chat__attach:disabled,
+.chat__camera:disabled {
+  opacity: 0.45;
+}
+
+.chat__attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.attachment {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  background: var(--bg-sunken);
+}
+
+.attachment__image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.attachment__remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: 0.9rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+/* ------------------------------------------------- message image grid */
+
+.message__images {
+  display: grid;
+  gap: 6px;
+  margin-top: var(--space-2);
+}
+
+.message__images--1 {
+  grid-template-columns: minmax(0, 220px);
+}
+
+.message__images--2,
+.message__images--3,
+.message__images--4 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-width: 360px;
+}
+
+.message__image-slot {
+  position: relative;
+  min-height: 84px;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg-sunken);
+  display: grid;
+  place-items: center;
+}
+
+.message__image {
+  display: block;
+  width: 100%;
+  max-height: 260px;
+  object-fit: cover;
+}
+
+.message__image-placeholder {
+  color: var(--text-faint);
+  font-size: 0.8rem;
+  padding: var(--space-2);
+}
+
+.message__image-slot.message__image--failed {
+  border: 1px dashed color-mix(in srgb, var(--danger) 45%, transparent);
+}
+
+/* ------------------------------------------------------- sessions drawer */
+
+.drawer-root {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-sheet);
+}
+
+.drawer-backdrop {
+  position: absolute;
+  inset: 0;
+  background: var(--overlay-scrim);
+  animation: drawer-fade var(--transition-fast);
+}
+
+.drawer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  width: min(86vw, 340px);
+  padding: calc(var(--space-3) + env(safe-area-inset-top, 0px)) var(--space-3) var(--space-3);
+  border-right: 1px solid var(--border);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-l);
+  transform: translateX(-100%);
+  transition: transform 160ms ease;
+}
+
+.drawer--open {
+  transform: translateX(0);
+}
+
+.drawer__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding-bottom: var(--space-2);
+}
+
+.drawer__title {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.drawer__host {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.drawer__host .screen--sessions {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+@keyframes drawer-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ---------------------------------------------------- DeepSeek-style shell */
+
+.app--chat {
+  height: 100vh;
+  height: 100dvh;
+}
+
+.app--chat .screen-host {
+  padding: 0;
+  max-height: none;
+}
+
+.app--chat .screen--chat {
+  border: 0;
+  border-radius: 0;
+  background: var(--bg);
+  box-shadow: none;
+}
+
+.app--pairing .topbar {
+  justify-content: center;
+}
+
+@media (min-width: 640px) {
+  .app--chat {
+    max-width: 820px;
+    margin: 0 auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer,
+  .chat__context-fill {
+    transition: none;
+  }
+}
+

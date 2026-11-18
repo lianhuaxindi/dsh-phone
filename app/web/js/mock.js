@@ -29,6 +29,60 @@ export const MOCK_PAIRING = Object.freeze({
   uri: 'dsphone://pair?v=1&host=127.0.0.1&port=8765&fp=a3f1c9d2e4b60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9a&code=123456',
 });
 
+/**
+ * What the mock "scan" (v1.1 QR pairing) resolves with. Mirrors the native
+ * `scanPairing.result` success payload from ARCHITECTURE §3.2 (D-030/D-031):
+ * the QR carries a primary host plus LAN candidate addresses and the PC name.
+ */
+export const MOCK_SCAN_RESULT = Object.freeze({
+  ok: true,
+  uri: 'dsphone://pair?v=1&host=192.168.1.10&port=8765&fp=a3f1c9d2e4b60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9a&code=123456&sid=srv-mock-1a2b&hosts=192.168.1.10,10.5.19.39&name=KQ-PC',
+  host: '192.168.1.10',
+  port: 8765,
+  fp: 'a3f1c9d2e4b60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9a',
+  code: '123456',
+  sid: 'srv-mock-1a2b',
+  hosts: ['192.168.1.10', '10.5.19.39'],
+  name: 'KQ-PC',
+});
+
+/**
+ * Built-in demo images for `pickImage` so the v1.1 image flow works fully
+ * offline. Tiny 64x48 PNGs (166/169 bytes) generated for the mock only.
+ */
+export const MOCK_SAMPLE_IMAGES = Object.freeze({
+  gallery: Object.freeze({
+    data: 'iVBORw0KGgoAAAANSUhEUgAAAEAAAAAwCAIAAAAuKetIAAAAbUlEQVR42u3YwQmAMAwF0E7iCk7SSVzCkQUvPdmeBRE8qA19n7/AuyQkKS9H6CYAAAAAAAAAgBcA2156KwDAb4BpXp8WAAAAACAaoJ4TDFCvEmkTAwCMDrifQu4BAAAAgPEAfqMAAAAAAAAftAGCEzT+tIrOZgAAAABJRU5ErkJggg==',
+    mimeType: 'image/png',
+    name: 'demo-gallery.png',
+    width: 64,
+    height: 48,
+  }),
+  camera: Object.freeze({
+    data: 'iVBORw0KGgoAAAANSUhEUgAAAEAAAAAwCAIAAAAuKetIAAAAcElEQVR42u3YsQmAMBBA0YwhVoK7O4vDWAgi2GkrEQQLNUce/AHuNXckqWm70CUAAAAAAAAAgBcA87KVFgDAb4B16J8GAAAAABANsE/juWCAbPqrofRLDABQO+B+C3kPAAAAANQH8DcKAAAAAADwQQcT5yrGRwv7KgAAAABJRU5ErkJggg==',
+    mimeType: 'image/png',
+    name: 'demo-camera.png',
+    width: 64,
+    height: 48,
+  }),
+});
+
+/** Per-session metadata used by the v1.1 top bar (D-028/D-032). */
+export const MOCK_SESSION_META = Object.freeze({
+  default: Object.freeze({
+    provider: 'deepseek-official',
+    model: 'deepseek-flash',
+    reasoningEffort: 'high',
+    contextWindow: 1000000,
+  }),
+  pro: Object.freeze({
+    provider: 'deepseek-official',
+    model: 'deepseek-v4-pro',
+    reasoningEffort: 'max',
+    contextWindow: 128000,
+  }),
+});
+
 /** Demo keywords that select a mock scenario (also surfaced in the UI hints). */
 export const MOCK_SCENARIOS = Object.freeze({
   approval: { name: 'approval', pattern: /(bash|shell|rm\s|删除|部署|deploy|执行命令|运行命令|审批|approve)/i },
@@ -36,6 +90,7 @@ export const MOCK_SCENARIOS = Object.freeze({
   error: { name: 'error', pattern: /(报错|失败|异常|错误|fail|error|crash)/i },
   long: { name: 'long', pattern: /(长文|详细|展开|完整|long|detail)/i },
   audio: { name: 'audio', pattern: /(语音|录音|耳机|audio|voice|耳机)/i },
+  model: { name: 'model', pattern: /(模型|切换模型|v4-pro|deepseek-v4-pro|换模型|model)/i },
 });
 
 /** Default simulated latencies in milliseconds. */
@@ -43,6 +98,9 @@ export const MOCK_LATENCY = Object.freeze({
   connect: 120,
   auth: 150,
   pair: 120,
+  scan: 180,
+  pick: 220,
+  media: 120,
   preheat: 400,
   firstPartial: 260,
   partialGap: 220,
@@ -115,6 +173,14 @@ export class MockTransport extends BaseTransport {
     this._sessionCounter = 2;
     this._messageCounter = 0;
     this._sessions = new Map();
+    this._sessionMeta = new Map();
+    this._sessionTokens = new Map();
+    this._media = new Map();
+    this._mediaCounter = 0;
+    this._turnUsage = null;
+    /** Hooks so tests/demo can force a failure path. */
+    this.scanFailure = null;
+    this.pickFailure = null;
     this._seedDemoSessions();
   }
 
@@ -132,9 +198,11 @@ export class MockTransport extends BaseTransport {
       '- 发送「选择方案」→ 追问弹窗',
       '- 发送「报错」→ 错误提示与「下一步」文案',
       '- 发送「长文」→ 自动滚动与回到底部按钮',
+      '- 发送「切换模型」→ 顶部模型/思考/上下文随之变化',
+      '- 点附件/相机 → 给这条消息附上演示图片',
       '- 点右下角麦克风 → 录音浮层、波形、上滑取消',
       '',
-      '设置里可以切换语言、深浅色和自动发送。',
+      '设置里可以切换语言、深浅色和自动发送；配对页支持扫码与手动输入。',
     ].join('\n');
     this._putSession(
       {
@@ -148,6 +216,19 @@ export class MockTransport extends BaseTransport {
         this._makeMessage({ sessionId: DEFAULT_SESSION_ID, role: 'assistant', text: welcome, createdAt: now - 60 }),
       ],
     );
+    this._sessionMeta.set(DEFAULT_SESSION_ID, { ...MOCK_SESSION_META.default });
+    this._sessionTokens.set(DEFAULT_SESSION_ID, 1200);
+    // History message with an image id only (v1.1): the UI must call
+    // `media.get` to resolve the bytes, like a real resumed session.
+    const seedMediaId = 'md-demo-seed-1';
+    this._media.set(seedMediaId, {
+      mediaId: seedMediaId,
+      mimeType: MOCK_SAMPLE_IMAGES.gallery.mimeType,
+      data: MOCK_SAMPLE_IMAGES.gallery.data,
+      width: MOCK_SAMPLE_IMAGES.gallery.width,
+      height: MOCK_SAMPLE_IMAGES.gallery.height,
+      sizeBytes: 166,
+    });
     this._putSession(
       {
         sessionId: 'demo-session-2',
@@ -156,7 +237,21 @@ export class MockTransport extends BaseTransport {
         lastPreview: '已为你检查部署脚本，发现 2 个可优化的地方。',
       },
       [
-        this._makeMessage({ sessionId: 'demo-session-2', role: 'user', text: '帮我看看部署脚本', createdAt: now - 3700 }),
+        this._makeMessage({
+          sessionId: 'demo-session-2',
+          role: 'user',
+          text: '帮我看看部署脚本',
+          createdAt: now - 3700,
+          images: [
+            {
+              mediaId: seedMediaId,
+              mimeType: MOCK_SAMPLE_IMAGES.gallery.mimeType,
+              width: MOCK_SAMPLE_IMAGES.gallery.width,
+              height: MOCK_SAMPLE_IMAGES.gallery.height,
+              sizeBytes: 166,
+            },
+          ],
+        }),
         this._makeMessage({
           sessionId: 'demo-session-2',
           role: 'assistant',
@@ -165,15 +260,17 @@ export class MockTransport extends BaseTransport {
         }),
       ],
     );
+    this._sessionMeta.set('demo-session-2', { ...MOCK_SESSION_META.pro });
+    this._sessionTokens.set('demo-session-2', 900);
   }
 
   _putSession(session, messages) {
     this._sessions.set(session.sessionId, { session: { ...session }, messages: messages ?? [] });
   }
 
-  _makeMessage({ sessionId, role, text, status = 'done', createdAt }) {
+  _makeMessage({ sessionId, role, text, status = 'done', createdAt, images = null }) {
     this._messageCounter += 1;
-    return {
+    const message = {
       messageId: `mock-msg-${this._messageCounter}`,
       sessionId,
       role,
@@ -181,6 +278,8 @@ export class MockTransport extends BaseTransport {
       status,
       createdAt: createdAt ?? this.now(),
     };
+    if (Array.isArray(images) && images.length > 0) message.images = images;
+    return message;
   }
 
   /** Server-side session list, already sorted like the real server. */
@@ -203,6 +302,89 @@ export class MockTransport extends BaseTransport {
     if (!entry) return;
     entry.session.updatedAt = this.now();
     if (lastPreview !== undefined) entry.session.lastPreview = String(lastPreview).slice(0, 80);
+  }
+
+  /* ------------------------------------------------- v1.1 meta / media */
+
+  _metaFor(sessionId) {
+    const meta = this._sessionMeta.get(sessionId);
+    return meta ? { ...meta } : { ...MOCK_SESSION_META.default };
+  }
+
+  /**
+   * Push a `session.meta` (v1.1 top bar) like the real server does right after
+   * `session.create.ok` / `session.resume.ok` and when the model selection or
+   * the context window changes (PROTOCOL §9, D-032).
+   */
+  _pushSessionMeta(sessionId, patch = null) {
+    if (patch) this._sessionMeta.set(sessionId, { ...this._metaFor(sessionId), ...patch });
+    const meta = this._metaFor(sessionId);
+    const used = this._sessionTokens.get(sessionId) ?? 0;
+    if (used > meta.contextWindow - 2000) this._sessionTokens.set(sessionId, Math.max(0, meta.contextWindow - 2000));
+    this._push({ type: MsgType.SESSION_META, sessionId, ...meta });
+  }
+
+  /** Cheap token estimate for the demo (Chinese ≈ 0.7 token/char). */
+  _estimateTokens(text) {
+    const value = String(text ?? '');
+    if (value.length === 0) return 0;
+    return Math.max(1, Math.round([...value].length * 0.7));
+  }
+
+  /** Turn optimistic `chat.send.images` into server-side media entries. */
+  _registerImages(images) {
+    if (!Array.isArray(images)) return [];
+    const registered = [];
+    for (const image of images) {
+      const data = typeof image?.data === 'string' ? image.data : '';
+      const mimeType = typeof image?.mimeType === 'string' && image.mimeType.startsWith('image/') ? image.mimeType : 'image/jpeg';
+      if (!data) continue;
+      this._mediaCounter += 1;
+      const mediaId = `md-demo-${this._mediaCounter}`;
+      const media = {
+        mediaId,
+        mimeType,
+        data,
+        width: Number.isInteger(image.width) && image.width > 0 ? image.width : 0,
+        height: Number.isInteger(image.height) && image.height > 0 ? image.height : 0,
+        sizeBytes: Math.round((data.length * 3) / 4),
+      };
+      this._media.set(mediaId, media);
+      registered.push({
+        mediaId,
+        mimeType,
+        width: media.width,
+        height: media.height,
+        sizeBytes: media.sizeBytes,
+      });
+    }
+    return registered;
+  }
+
+  _makeUsage(assistantMessage) {
+    if (!this._turnUsage) return null;
+    const sessionId = assistantMessage.sessionId;
+    const meta = this._metaFor(sessionId);
+    const outputTokens = Math.max(1, this._estimateTokens(assistantMessage.text));
+    const reasoningTokens =
+      meta.reasoningEffort === 'low'
+        ? 0
+        : Math.round(outputTokens * (meta.reasoningEffort === 'max' ? 0.8 : 0.45));
+    const inputTokens = this._turnUsage.inputTokens;
+    const totalTokens = inputTokens + outputTokens;
+    const base = this._sessionTokens.get(sessionId) ?? 0;
+    const usedTokens = Math.min(meta.contextWindow, base + outputTokens + reasoningTokens);
+    this._sessionTokens.set(sessionId, usedTokens);
+    return {
+      inputTokens,
+      outputTokens,
+      totalTokens,
+      cacheReadTokens: Math.floor(inputTokens * 0.6),
+      cacheWriteTokens: Math.floor(inputTokens * 0.1),
+      reasoningTokens,
+      contextWindow: meta.contextWindow,
+      usedTokens,
+    };
   }
 
   /* ------------------------------------------------------- timer helpers */
@@ -341,8 +523,55 @@ export class MockTransport extends BaseTransport {
     }, this.latency.export);
   }
 
-  async _scanPairing() {
-    return { supported: true, ...MOCK_PAIRING };
+  /**
+   * v1.1 QR pairing: resolves like the native `scanPairing.result` after the
+   * camera would have decoded the QR (D-030). Set `scanFailure` to a native
+   * reason (`permission_denied`, `cancelled`, `no_camera`, `decode_failed`) to
+   * exercise the failure copy.
+   */
+  _scanPairing() {
+    return new Promise((resolve) => {
+      this._setTimeout(() => {
+        if (this.scanFailure) resolve({ ok: false, supported: true, reason: this.scanFailure });
+        else resolve({ ...MOCK_SCAN_RESULT });
+      }, this.latency.scan);
+    });
+  }
+
+  /** v1.1 image picker: resolves a tiny built-in demo image. */
+  _pickImage(source) {
+    const src = source === 'camera' ? 'camera' : 'gallery';
+    return new Promise((resolve) => {
+      this._setTimeout(() => {
+        if (this.pickFailure) resolve({ ok: false, source: src, reason: this.pickFailure });
+        else resolve({ ok: true, source: src, ...MOCK_SAMPLE_IMAGES[src] });
+      }, this.latency.pick);
+    });
+  }
+
+  /** v1.1 history media: serve the seeded/uploaded demo images. */
+  _mediaGet(mediaId) {
+    return new Promise((resolve) => {
+      this._setTimeout(() => {
+        const media = this._media.get(mediaId);
+        if (!media) resolve({ ok: false, code: 3001, reason: 'not_found', mediaId });
+        else resolve({ ok: true, media: { ...media } });
+      }, this.latency.media);
+    });
+  }
+
+  _handleMediaGet(message, reqId) {
+    const media = this._media.get(message.mediaId);
+    if (!media) {
+      this._reply(reqId, { type: MsgType.ERROR, code: 3001, message: '媒体不存在', retryable: false });
+      return;
+    }
+    this._reply(reqId, {
+      type: MsgType.MEDIA_DATA,
+      mediaId: media.mediaId,
+      mimeType: media.mimeType,
+      data: media.data,
+    });
   }
 
   /* ----------------------------------------------------- protocol server */
@@ -390,7 +619,10 @@ export class MockTransport extends BaseTransport {
           lastPreview: '',
         };
         this._putSession(session, []);
+        this._sessionMeta.set(sessionId, { ...MOCK_SESSION_META.default });
+        this._sessionTokens.set(sessionId, 0);
         this._reply(reqId, { type: MsgType.SESSION_CREATE_OK, session });
+        this._pushSessionMeta(sessionId);
         break;
       }
       case MsgType.SESSION_RESUME: {
@@ -404,6 +636,7 @@ export class MockTransport extends BaseTransport {
           session: { ...entry.session },
           messages: entry.messages.map((msg) => ({ ...msg })),
         });
+        this._pushSessionMeta(entry.session.sessionId);
         break;
       }
       case MsgType.SESSION_HISTORY: {
@@ -432,6 +665,9 @@ export class MockTransport extends BaseTransport {
         break;
       case MsgType.AUDIO_STOP:
         this._stopAudio();
+        break;
+      case MsgType.MEDIA_GET:
+        this._handleMediaGet(message, reqId);
         break;
       default:
         if (message.type !== MsgType.PING) {
@@ -465,20 +701,50 @@ export class MockTransport extends BaseTransport {
       return;
     }
     const text = String(message.text ?? '');
+    const images = Array.isArray(message.images) ? message.images : [];
+    if (images.length > 4) {
+      this._reply(undefined, { type: MsgType.ERROR, code: 4002, message: '最多只能发送 4 张图片', retryable: false });
+      return;
+    }
+    if (text.length === 0 && images.length === 0) {
+      this._reply(undefined, { type: MsgType.ERROR, code: 4002, message: '消息内容不能为空', retryable: false });
+      return;
+    }
+    const registered = this._registerImages(images);
+    if (images.length > 0 && registered.length === 0) {
+      this._reply(undefined, { type: MsgType.ERROR, code: 4002, message: '图片编码无效，请重新选择图片', retryable: false });
+      return;
+    }
     const clientId = message.clientId ?? `mock-client-${this._messageCounter + 1}`;
     const entry = this._getSession(sessionId);
+    const preview = text.trim() || `[图片] ${registered.length} 张`;
 
-    const userMessage = this._makeMessage({ sessionId, role: 'user', text });
+    const userMessage = this._makeMessage({
+      sessionId,
+      role: 'user',
+      text,
+      images: registered.length > 0 ? registered : null,
+    });
     entry.messages.push(userMessage);
-    this._touchSession(sessionId, text.slice(0, 80));
+    this._touchSession(sessionId, preview.slice(0, 80));
 
     const assistantMessage = this._makeMessage({ sessionId, role: 'assistant', text: '', status: 'streaming' });
     entry.messages.push(assistantMessage);
     this._busySessionId = sessionId;
 
+    // v1.1 token accounting → assistant.done.usage (PROTOCOL §9, D-032).
+    const inputTokens = this._estimateTokens(text) + registered.length * 900;
+    const usedBefore = this._sessionTokens.get(sessionId) ?? 0;
+    this._sessionTokens.set(sessionId, usedBefore + inputTokens);
+    this._turnUsage = { inputTokens };
+
     this._push({ type: MsgType.CHAT_ACK, clientId, messageId: assistantMessage.messageId });
-    const scenario = pickScenario(text);
-    this._setTimeout(() => this._runScenario(scenario, { sessionId, text, assistantMessage }), this.latency.tool);
+    const picked = pickScenario(text);
+    const scenario = registered.length > 0 && picked === 'default' ? 'image' : picked;
+    this._setTimeout(
+      () => this._runScenario(scenario, { sessionId, text, assistantMessage, images: registered }),
+      this.latency.tool,
+    );
   }
 
   _streamInto(assistantMessage, chunks) {
@@ -514,11 +780,14 @@ export class MockTransport extends BaseTransport {
     assistantMessage.status = 'done';
     this._busySessionId = null;
     this._touchSession(assistantMessage.sessionId, assistantMessage.text.slice(-80));
+    const usage = this._makeUsage(assistantMessage);
+    this._turnUsage = null;
     this._push({
       type: MsgType.ASSISTANT_DONE,
       sessionId: assistantMessage.sessionId,
       messageId: assistantMessage.messageId,
       finishReason,
+      ...(usage ? { usage } : {}),
     });
   }
 
@@ -531,9 +800,29 @@ export class MockTransport extends BaseTransport {
     this._finishTurn(streaming, 'cancelled');
   }
 
-  _runScenario(scenario, { sessionId, text, assistantMessage }) {
+  _runScenario(scenario, { sessionId, text, assistantMessage, images = [] }) {
     const entry = this._getSession(sessionId);
     switch (scenario) {
+      case 'model': {
+        const current = this._metaFor(sessionId);
+        const next = current.model === 'deepseek-v4-pro' ? { ...MOCK_SESSION_META.default } : { ...MOCK_SESSION_META.pro };
+        this._pushSessionMeta(sessionId, next);
+        this._streamInto(
+          assistantMessage,
+          chunkText(
+            `已切换到 ${next.model}，思考强度 ${next.reasoningEffort}，上下文窗口 ${Math.round(next.contextWindow / 1000)}K。顶部栏会同步显示新的模型、思考强度与上下文占用。`,
+          ),
+        );
+        return;
+      }
+      case 'image':
+        this._streamInto(
+          assistantMessage,
+          chunkText(
+            `我收到了你发的 ${images.length} 张图片，已经可以一起分析。演示模式下这里只会显示缩略图；真实连接时图片会交给 DeepSeek-V4.1-Flash 的视觉能力处理。`,
+          ),
+        );
+        return;
       case 'approval':
         this._pushToolStatus({ sessionId, state: 'running', title: '执行命令' });
         this._pendingApproval = assistantMessage;
@@ -606,6 +895,7 @@ export class MockTransport extends BaseTransport {
           }
           this._busySessionId = null;
           assistantMessage.status = 'error';
+          this._turnUsage = null;
           this._push({
             type: MsgType.TURN_ERROR,
             sessionId,

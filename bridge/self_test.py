@@ -104,13 +104,14 @@ def _check_config(config: BridgeConfig) -> CheckResult:
         status=PASS,
         detail=(
             f"监听 {host}:{server.port}，maxConnections={server.max_connections}，"
-            "通配地址拒绝规则生效"
+            f"bindAll={server.bind_all}，通配地址拒绝规则生效"
         ),
         data={
             "source": str(config.source_path) if config.source_path else None,
             "host": host,
             "port": server.port,
             "maxConnections": server.max_connections,
+            "bindAll": server.bind_all,
             "baseDir": str(config.base_dir),
         },
     )
@@ -226,6 +227,70 @@ def _check_runtime(config: BridgeConfig) -> CheckResult:
     )
 
 
+def _check_dsh_config(config: BridgeConfig) -> CheckResult:
+    """D-028：真模型配置的只读检查（不泄露 apiKey 内容）。"""
+    dsh = config.dsh
+    api_key_configured = bool(dsh.api_key)
+    data = {
+        "enabled": dsh.enabled,
+        "provider": dsh.provider,
+        "model": dsh.model,
+        "reasoningEffort": dsh.reasoning_effort,
+        "maxTokens": dsh.max_tokens,
+        "contextWindowTokens": dsh.context_window_tokens,
+        "baseUrl": dsh.base_url,
+        "apiKeyConfigured": api_key_configured,
+    }
+    key_state = "已配置" if api_key_configured else "未配置"
+    detail = (
+        f"enabled={dsh.enabled}，provider={dsh.provider or '(默认)'}，"
+        f"model={dsh.model or '(默认)'}，reasoningEffort={dsh.reasoning_effort}，"
+        f"maxTokens={dsh.max_tokens}，contextWindowTokens={dsh.context_window_tokens}，"
+        f"apiKey {key_state}"
+    )
+    if not dsh.enabled:
+        return CheckResult(
+            name="dsh.config", status=SKIP, detail=detail + "；[dsh].enabled=false（fake DSH，不连真模型）",
+            data=data,
+        )
+    if not api_key_configured:
+        return CheckResult(
+            name="dsh.config",
+            status=SKIP,
+            detail=detail + "；未配置 apiKey（可启动，真 prompt 将返回 turn.error 3003 并提示填写）",
+            data=data,
+        )
+    return CheckResult(name="dsh.config", status=PASS, detail=detail, data=data)
+
+
+def _check_media(config: BridgeConfig) -> CheckResult:
+    """v1.1：state/media/ 目录可写（图片落盘依赖，D-029）。"""
+    media_dir = config.state_dir / "media"
+    probe = media_dir / f".self-test-{__version__}"
+    try:
+        media_dir.mkdir(parents=True, exist_ok=True)
+        probe.write_bytes(b"self-test")
+        writable = probe.read_bytes() == b"self-test"
+        probe.unlink(missing_ok=True)
+    except OSError as exc:
+        return CheckResult(
+            name="media",
+            status=FAIL,
+            detail=f"state/media 不可写: {exc}；图片消息将返回 error 4002",
+            data={"mediaDir": str(media_dir)},
+        )
+    if not writable:
+        return CheckResult(
+            name="media", status=FAIL, detail="state/media 写入校验失败", data={"mediaDir": str(media_dir)}
+        )
+    return CheckResult(
+        name="media",
+        status=PASS,
+        detail=f"state/media 可写：{media_dir}",
+        data={"mediaDir": str(media_dir)},
+    )
+
+
 async def _check_smoke(config: BridgeConfig) -> CheckResult:
     """``--smoke``：真实启动 SDK runtime 做 start/initialize/session/close。"""
     try:
@@ -280,15 +345,19 @@ def _check_redaction() -> CheckResult:
         "nonce": "bm9uY2UxMjM0NTY3OA==",
         "pcm": b"\x00" * 640,
         "text": "这是一段不应该完整出现在日志里的正文。" * 10,
+        "data": "iVBORw0KGgo" * 50,
+        "images": [{"mediaId": "a" * 64, "mimeType": "image/png"}],
         "safeKey": "visible-value",
     }
     redacted = redact_fields(fake)
     problems: list[str] = []
-    for key in ("token", "deviceToken", "hmac", "nonce"):
+    for key in ("token", "deviceToken", "hmac", "nonce", "data"):
         if redacted.get(key) != "***":
             problems.append(f"{key} 未被掩码")
     if redacted.get("pcm") != "<640B>":
         problems.append("pcm 未按长度记录")
+    if redacted.get("images") != "<1 images>":
+        problems.append("images 未按数量记录")
     text_value = str(redacted.get("text", ""))
     if text_value == fake["text"] or "…" not in text_value or len(text_value) > 90:
         problems.append("长文本未截断")
@@ -305,7 +374,7 @@ def _check_redaction() -> CheckResult:
     return CheckResult(
         name="logging.redaction",
         status=PASS,
-        detail="假 token/hmac/nonce 均被掩码为 ***，音频按字节数记录，长文本截断",
+        detail="假 token/hmac/nonce/data 均被掩码为 ***，音频按字节数记录，images 按数量记录，长文本截断",
     )
 
 
@@ -322,10 +391,12 @@ async def run_self_test(
         _check_config(config),
         _check_tls(config),
         _check_asr(config),
+        _check_dsh_config(config),
         _check_runtime(config),
     ]
     if smoke:
         checks.append(await _check_smoke(config))
+    checks.append(_check_media(config))
     checks.append(_check_redaction())
 
     passed = sum(1 for c in checks if c.status == PASS)

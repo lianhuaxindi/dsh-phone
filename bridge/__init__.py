@@ -9,4 +9,4 @@ Bridge 是手机 App（C）与电脑端 DSH SDK（S 侧内部）之间的 WebSoc
 __all__ = ["__version__"]
 
 #: Bridge 版本（写入 ``hello.ok.bridge``，见 PROTOCOL §4.2/§14）
-__version__ = "1.0.0"
+__version__ = "1.1.0"

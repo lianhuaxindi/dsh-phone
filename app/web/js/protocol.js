@@ -31,6 +31,32 @@ export const PROTOCOL = Object.freeze({
   maxAudioStreamMs: 120000,
 });
 
+/**
+ * Protocol v1.1 additive constants: image messages and metadata display
+ * (PROTOCOL §8.1/§9, DECISIONS D-028/D-029/D-032).
+ */
+export const MEDIA = Object.freeze({
+  /** `chat.send.images` limits (PROTOCOL §9 v1.1). */
+  maxImages: 4,
+  /** Max decoded bytes per image (2 MiB). */
+  maxImageBytes: 2 * 1024 * 1024,
+  /** Max decoded bytes for all images of one turn (6 MiB). */
+  maxTotalImageBytes: 6 * 1024 * 1024,
+  /** Native re-encodes longer edges to this size (D-029). */
+  maxImageEdge: 1600,
+  /** Formats accepted by the bridge magic-bytes check (PROTOCOL §9). */
+  allowedMimeTypes: Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif']),
+  /** Fallback context window when `session.meta`/`usage` omit it (D-032). */
+  defaultContextWindow: 1000000,
+  /** Model ids displayed with a friendly label (D-032); unknown ids pass through. */
+  modelLabels: Object.freeze({
+    'deepseek-flash': 'DeepSeek-V4.1-Flash',
+    'deepseek-v4-pro': 'DeepSeek-V4-Pro',
+  }),
+  /** Reasoning efforts accepted by the runtime (D-028). */
+  reasoningEfforts: Object.freeze(['low', 'high', 'max', 'disabled']),
+});
+
 /** Frames / audio constants (PROTOCOL §10.2). */
 export const AUDIO = Object.freeze({
   frameTypePcm16: 0x01,
@@ -66,6 +92,7 @@ export const MsgType = Object.freeze({
   SESSION_RESUME_OK: 'session.resume.ok',
   SESSION_HISTORY: 'session.history',
   SESSION_HISTORY_OK: 'session.history.ok',
+  SESSION_META: 'session.meta',
   CHAT_SEND: 'chat.send',
   CHAT_ACK: 'chat.ack',
   CHAT_CANCEL: 'chat.cancel',
@@ -73,6 +100,8 @@ export const MsgType = Object.freeze({
   ASSISTANT_DONE: 'assistant.done',
   TOOL_STATUS: 'tool.status',
   TURN_ERROR: 'turn.error',
+  MEDIA_GET: 'media.get',
+  MEDIA_DATA: 'media.data',
   AUDIO_START: 'audio.start',
   AUDIO_READY: 'audio.ready',
   AUDIO_STOP: 'audio.stop',
@@ -98,6 +127,7 @@ export const ErrorCode = Object.freeze({
   APPROVAL_TIMEOUT: 3002,
   MODEL_ERROR: 3003,
   SERVER_BUSY: 4001,
+  IMAGE_INVALID: 4002,
   INTERNAL: 5001,
   SDK_PROTOCOL: 5002,
 });
@@ -117,6 +147,7 @@ export const RecoveryAction = Object.freeze({
   DIAGNOSTICS: 'diagnostics',
   WAIT_PAIR_LOCK: 'wait-pair-lock',
   RECONNECT: 'reconnect',
+  RESELECT_IMAGE: 'reselect-image',
 });
 
 /** Error code metadata. `i18nKey` is resolved by i18n.js (title/next strings). */
@@ -130,6 +161,7 @@ export const ERROR_SPECS = Object.freeze({
   [ErrorCode.APPROVAL_TIMEOUT]: { retryable: true, action: RecoveryAction.APPROVAL_DEFAULTED, i18nKey: 'error.3002' },
   [ErrorCode.MODEL_ERROR]: { retryable: true, action: RecoveryAction.RETRY, i18nKey: 'error.3003' },
   [ErrorCode.SERVER_BUSY]: { retryable: true, action: RecoveryAction.RETRY_LATER, i18nKey: 'error.4001' },
+  [ErrorCode.IMAGE_INVALID]: { retryable: false, action: RecoveryAction.RESELECT_IMAGE, i18nKey: 'error.4002' },
   [ErrorCode.INTERNAL]: { retryable: true, action: RecoveryAction.DIAGNOSTICS, i18nKey: 'error.5001' },
   [ErrorCode.SDK_PROTOCOL]: { retryable: false, action: RecoveryAction.DIAGNOSTICS, i18nKey: 'error.5002' },
 });
@@ -529,8 +561,8 @@ export function validatePairingField(field, value) {
   }
 }
 
-/** Build a `dsphone://pair?...` URI from pairing fields. */
-export function buildPairUri({ host, port, fp, code, sid = null }) {
+/** Build a `dsphone://pair?...` URI from pairing fields (PROTOCOL §5.1). */
+export function buildPairUri({ host, port, fp, code, sid = null, hosts = null, name = null }) {
   const params = new URLSearchParams();
   params.set('v', '1');
   params.set('host', validatePairingField('host', host));
@@ -538,12 +570,17 @@ export function buildPairUri({ host, port, fp, code, sid = null }) {
   params.set('fp', validatePairingField('fp', fp));
   params.set('code', validatePairingField('code', code));
   if (sid) params.set('sid', String(sid));
+  if (Array.isArray(hosts)) {
+    const list = hosts.map((candidate) => validatePairingField('host', candidate)).filter(Boolean);
+    if (list.length > 0) params.set('hosts', list.join(','));
+  }
+  if (name) params.set('name', String(name));
   return `${PAIR_URI_SCHEME}?${params.toString()}`;
 }
 
 /**
  * Parse a pairing URI (PROTOCOL §5.1) into validated pairing fields.
- * Also accepts being handed a plain `host:port` string? No — URI only.
+ * v1.1 may carry optional `hosts` (comma-separated candidates) and `name`.
  */
 export function parsePairUri(uri) {
   const text = String(uri ?? '').trim();
@@ -554,6 +591,14 @@ export function parsePairUri(uri) {
   const params = new URLSearchParams(text.slice(queryIndex + 1));
   const v = Number(params.get('v'));
   if (v !== 1) throw new ProtocolError('unsupported pairing URI version', { kind: ProtocolErrorKind.VALIDATION });
+  const rawHosts = params.get('hosts');
+  const hosts = rawHosts
+    ? rawHosts
+        .split(',')
+        .map((candidate) => candidate.trim())
+        .filter(Boolean)
+        .map((candidate) => validatePairingField('host', candidate))
+    : [];
   return {
     v: 1,
     host: validatePairingField('host', params.get('host')),
@@ -561,6 +606,8 @@ export function parsePairUri(uri) {
     fp: validatePairingField('fp', params.get('fp')),
     code: validatePairingField('code', params.get('code')),
     sid: params.get('sid') || null,
+    hosts,
+    name: params.get('name') || null,
   };
 }
 
@@ -627,16 +674,84 @@ export function validateChatText(text) {
   return value;
 }
 
-/** Build `chat.send` (PROTOCOL §9). */
-export function buildChatSend(counter, { sessionId, text, clientId = randomUuid() }) {
+/** Decoded byte length of a base64 string (throws on obviously invalid input). */
+export function base64DecodedBytes(data) {
+  const text = String(data ?? '').replace(/\s+/g, '');
+  if (text.length === 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(text) || text.length % 4 !== 0) {
+    throw new ProtocolError('image data must be valid base64', { kind: ProtocolErrorKind.VALIDATION });
+  }
+  const padding = text.endsWith('==') ? 2 : text.endsWith('=') ? 1 : 0;
+  return (text.length * 3) / 4 - padding;
+}
+
+/**
+ * Validate `chat.send.images` client-side before it reaches the bridge
+ * (PROTOCOL §9 v1.1: ≤4 images, ≤2 MiB each, ≤6 MiB total, JPEG/PNG/WEBP/GIF).
+ * Returns a normalized array of `{mimeType,data,name?,width?,height?}`.
+ */
+export function validateChatImages(images) {
+  if (images === undefined || images === null) return [];
+  if (!Array.isArray(images)) throw new ProtocolError('chat.send.images must be an array', { kind: ProtocolErrorKind.VALIDATION });
+  if (images.length > MEDIA.maxImages) {
+    throw new ProtocolError(`at most ${MEDIA.maxImages} images per message`, { kind: ProtocolErrorKind.VALIDATION });
+  }
+  let total = 0;
+  const normalized = images.map((raw, index) => {
+    if (!isPlainObject(raw)) throw new ProtocolError(`image[${index}] must be an object`, { kind: ProtocolErrorKind.VALIDATION });
+    const mimeType = String(raw.mimeType ?? '').toLowerCase();
+    if (!MEDIA.allowedMimeTypes.includes(mimeType)) {
+      throw new ProtocolError(`image[${index}].mimeType must be ${MEDIA.allowedMimeTypes.join('|')}`, { kind: ProtocolErrorKind.VALIDATION });
+    }
+    const size = base64DecodedBytes(raw.data);
+    if (size > MEDIA.maxImageBytes) throw new ProtocolError(`image[${index}] exceeds ${MEDIA.maxImageBytes} bytes`, { kind: ProtocolErrorKind.VALIDATION });
+    total += size;
+    const image = { mimeType, data: String(raw.data) };
+    if (raw.name !== undefined && raw.name !== null && String(raw.name).trim() !== '') image.name = String(raw.name);
+    if (raw.width !== undefined) {
+      const width = Number(raw.width);
+      if (!Number.isInteger(width) || width < 1) throw new ProtocolError(`image[${index}].width must be a positive integer`, { kind: ProtocolErrorKind.VALIDATION });
+      image.width = width;
+    }
+    if (raw.height !== undefined) {
+      const height = Number(raw.height);
+      if (!Number.isInteger(height) || height < 1) throw new ProtocolError(`image[${index}].height must be a positive integer`, { kind: ProtocolErrorKind.VALIDATION });
+      image.height = height;
+    }
+    return image;
+  });
+  if (total > MEDIA.maxTotalImageBytes) {
+    throw new ProtocolError(`images exceed ${MEDIA.maxTotalImageBytes} bytes in total`, { kind: ProtocolErrorKind.VALIDATION });
+  }
+  return normalized;
+}
+
+/**
+ * Build `chat.send` (PROTOCOL §9). v1.1: `images` is optional; text may be
+ * empty when at least one image is attached.
+ */
+export function buildChatSend(counter, { sessionId, text, clientId = randomUuid(), images }) {
   if (!sessionId) throw new ProtocolError('sessionId is required', { kind: ProtocolErrorKind.VALIDATION });
-  return {
+  const normalizedImages = validateChatImages(images);
+  const value = normalizedImages.length > 0 ? String(text ?? '') : validateChatText(text);
+  if (value.length > PROTOCOL.maxTextChars) {
+    throw new ProtocolError(`message text exceeds ${PROTOCOL.maxTextChars} characters`, { kind: ProtocolErrorKind.VALIDATION });
+  }
+  const message = {
     type: MsgType.CHAT_SEND,
     seq: takeSeq(counter),
     clientId,
     sessionId,
-    text: validateChatText(text),
+    text: value,
   };
+  if (normalizedImages.length > 0) message.images = normalizedImages;
+  return message;
+}
+
+/** Build `media.get` (PROTOCOL §9 v1.1). */
+export function buildMediaGet(counter, { mediaId }) {
+  const id = String(mediaId ?? '').trim();
+  if (!id) throw new ProtocolError('mediaId is required', { kind: ProtocolErrorKind.VALIDATION });
+  return { type: MsgType.MEDIA_GET, seq: takeSeq(counter), mediaId: id };
 }
 
 /** Build `chat.cancel` (PROTOCOL §9). */
@@ -743,6 +858,33 @@ export function normalizeSession(raw) {
   };
 }
 
+/** Normalize one image reference of a `Message` (PROTOCOL §8.1 v1.1). */
+export function normalizeImage(raw) {
+  if (!isPlainObject(raw)) throw new ProtocolError('message.images[] must be an object', { kind: ProtocolErrorKind.INVALID_MESSAGE });
+  const mimeType = String(raw.mimeType ?? '').toLowerCase();
+  return {
+    mediaId: requireString(raw.mediaId, 'image.mediaId'),
+    mimeType: MEDIA.allowedMimeTypes.includes(mimeType) ? mimeType : 'image/jpeg',
+    width: Number.isFinite(Number(raw.width)) && Number(raw.width) > 0 ? Math.round(Number(raw.width)) : 0,
+    height: Number.isFinite(Number(raw.height)) && Number(raw.height) > 0 ? Math.round(Number(raw.height)) : 0,
+    sizeBytes: Number.isFinite(Number(raw.sizeBytes)) && Number(raw.sizeBytes) >= 0 ? Math.round(Number(raw.sizeBytes)) : 0,
+  };
+}
+
+/** Normalize `Message.images`; invalid entries are dropped instead of failing the message. */
+export function normalizeImageList(rawImages) {
+  if (!Array.isArray(rawImages)) return [];
+  const images = [];
+  for (const raw of rawImages) {
+    try {
+      images.push(normalizeImage(raw));
+    } catch {
+      /* a bad image reference must not hide the message text */
+    }
+  }
+  return images;
+}
+
 /** Normalize a `Message` object (PROTOCOL §8.1). */
 export function normalizeMessage(raw) {
   if (!isPlainObject(raw)) throw new ProtocolError('message must be an object', { kind: ProtocolErrorKind.INVALID_MESSAGE });
@@ -751,6 +893,7 @@ export function normalizeMessage(raw) {
     throw new ProtocolError('message.role must be user|assistant|system|tool', { kind: ProtocolErrorKind.INVALID_MESSAGE });
   }
   const status = raw.status === 'streaming' || raw.status === 'error' ? raw.status : 'done';
+  const images = role === 'user' ? normalizeImageList(raw.images) : [];
   return {
     messageId: requireString(raw.messageId, 'message.messageId'),
     sessionId: requireString(raw.sessionId, 'message.sessionId'),
@@ -759,6 +902,7 @@ export function normalizeMessage(raw) {
     status,
     createdAt: coerceTimestamp(raw.createdAt),
     ...(raw.clientId ? { clientId: String(raw.clientId) } : {}),
+    ...(images.length > 0 ? { images } : {}),
   };
 }
 
@@ -817,6 +961,69 @@ export function normalizeQuestionRequest(raw) {
     sessionId: typeof raw.sessionId === 'string' ? raw.sessionId : null,
     questions,
     deadline: coerceTimestamp(raw.deadline),
+  };
+}
+
+/* ------------------------------------------------------------------------- */
+/* Protocol v1.1 metadata / media normalizers                                 */
+/* ------------------------------------------------------------------------- */
+
+function optionalNonNegativeInt(value) {
+  if (value === undefined || value === null || value === '') return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? Math.round(n) : undefined;
+}
+
+/**
+ * Normalize `session.meta` (PROTOCOL §9 v1.1). Missing keys are omitted
+ * (the bridge never fabricates zeros), so callers must treat them as unknown.
+ */
+export function normalizeSessionMeta(raw) {
+  if (!isPlainObject(raw)) throw new ProtocolError('session.meta must be an object', { kind: ProtocolErrorKind.INVALID_MESSAGE });
+  const meta = { sessionId: requireString(raw.sessionId, 'session.meta.sessionId') };
+  if (typeof raw.provider === 'string' && raw.provider) meta.provider = raw.provider;
+  if (typeof raw.model === 'string' && raw.model) meta.model = raw.model;
+  if (typeof raw.reasoningEffort === 'string' && raw.reasoningEffort) meta.reasoningEffort = raw.reasoningEffort.toLowerCase();
+  const contextWindow = optionalNonNegativeInt(raw.contextWindow);
+  if (contextWindow !== undefined && contextWindow > 0) meta.contextWindow = contextWindow;
+  return meta;
+}
+
+/**
+ * Normalize `assistant.done.usage` (PROTOCOL §9 v1.1). Returns null when the
+ * payload carries no usable token numbers; `usedTokens` falls back to
+ * `totalTokens ?? inputTokens + outputTokens`.
+ */
+export function normalizeUsage(raw) {
+  if (!isPlainObject(raw)) return null;
+  const usage = {};
+  for (const key of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens', 'contextWindow', 'usedTokens']) {
+    const value = optionalNonNegativeInt(raw[key]);
+    if (value !== undefined) usage[key] = value;
+  }
+  const total = optionalNonNegativeInt(raw.totalTokens);
+  if (total !== undefined) usage.totalTokens = total;
+  if (usage.usedTokens === undefined) {
+    if (usage.totalTokens !== undefined) usage.usedTokens = usage.totalTokens;
+    else if (usage.inputTokens !== undefined || usage.outputTokens !== undefined) {
+      usage.usedTokens = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
+    }
+  }
+  if (usage.contextWindow === undefined && usage.usedTokens === undefined && usage.inputTokens === undefined) return null;
+  return usage;
+}
+
+/** Normalize `media.data` (PROTOCOL §9 v1.1); `data` is base64 of ≤2 MiB. */
+export function normalizeMediaData(raw) {
+  if (!isPlainObject(raw)) throw new ProtocolError('media.data must be an object', { kind: ProtocolErrorKind.INVALID_MESSAGE });
+  const mediaId = requireString(raw.mediaId, 'media.mediaId');
+  const mimeType = String(raw.mimeType ?? '').toLowerCase();
+  const data = String(raw.data ?? '');
+  base64DecodedBytes(data);
+  return {
+    mediaId,
+    mimeType: MEDIA.allowedMimeTypes.includes(mimeType) ? mimeType : 'image/jpeg',
+    data,
   };
 }
 

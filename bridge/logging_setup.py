@@ -35,20 +35,34 @@ SENSITIVE_KEYS = {
     "secret",
     "password",
     "authorization",
+    # v1.1（D-029）：图片 base64 / 媒体数据绝不进日志
+    "data",
+    "image",
+    "images",
+    "image_data",
 }
 
 #: 这些键只记录长度/摘要，不记录原文。
 TRUNCATED_KEYS = {"text", "args", "argspreview", "args_preview", "payload", "pcm"}
+#: 这些键只记录元素个数。
+COUNT_KEYS = {"images"}
 MAX_STRING_LEN = 120
 MAX_TEXT_LOG_LEN = 64
 
 
+def _normalize_key(key: str) -> str:
+    return key.strip().lower().replace("-", "_")
+
+
 def _is_sensitive(key: str) -> bool:
-    return key.strip().lower().replace("-", "_") in SENSITIVE_KEYS
+    return _normalize_key(key) in SENSITIVE_KEYS
 
 
 def redact_value(key: str, value: Any) -> Any:
     """按上下文脱敏单个值。"""
+    normalized = _normalize_key(key)
+    if normalized in COUNT_KEYS and isinstance(value, (list, tuple)):
+        return f"<{len(value)} images>"
     if _is_sensitive(key):
         return "***"
     if isinstance(value, Mapping):
@@ -58,7 +72,7 @@ def redact_value(key: str, value: Any) -> Any:
     if isinstance(value, (bytes, bytearray, memoryview)):
         return f"<{len(bytes(value))}B>"
     if isinstance(value, str):
-        if key.strip().lower().replace("-", "_") in TRUNCATED_KEYS:
+        if normalized in TRUNCATED_KEYS:
             if len(value) > MAX_TEXT_LOG_LEN:
                 return value[:MAX_TEXT_LOG_LEN] + f"…(+{len(value) - MAX_TEXT_LOG_LEN})"
             return value

@@ -5,31 +5,42 @@
 #
 # 说明:
 # - 相对路径以“本配置文件所在目录”为基准，因此下列 state/... 会落在 bridge/state/。
-# - host 必须是具体监听地址（默认 127.0.0.1）；禁止 0.0.0.0，局域网访问请填本机局域网 IP。
-# - M1 阶段 [dsh].enabled=false：使用内置 Fake DSH（真实 SDK 接线规范见
-#   docs/ARCHITECTURE.md §2.2.1 与 docs/DECISIONS.md D-018..D-021）；
-#   启用真实 SDK 需安装 bridge/requirements-sdk.txt（--pre），CI 不安装。
+# - host 必须是具体监听地址（默认 127.0.0.1）；禁止 0.0.0.0。
+#   局域网访问请填本机局域网 IP，或设 bindAll=true（会监听 0.0.0.0，仅在可信网络使用）。
+# - [dsh] 默认走真实 DeepSeek 模型（D-028）：provider=deepseek-official、
+#   model=deepseek-flash、reasoningEffort=high、1M 上下文、最大输出 384K。
+#   apiKey 留空时回退环境变量 DEEPSEEK_API_KEY / DSH_PHONE_API_KEY；
+#   未配置 apiKey 也能启动，但真实对话会返回 turn.error{3003} 并提示填写 apiKey。
+#   runtimeExe 留空时按 D-022 解析链自动探测（已安装 DSH → wheel 内置 runtime）。
 
 [server]
 host = "127.0.0.1"
 port = 8765
 maxConnections = 4
+# true = 监听 0.0.0.0（仅可信局域网；会在日志/配对页给出 WARNING）。
+bindAll = false
 
 [tls]
 certFile = "state/certs/bridge.crt"
 keyFile = "state/certs/bridge.key"
 
 [dsh]
-enabled = false
+enabled = true
 home = "state/dsh_home"
-provider = ""
-model = ""
-# D-021：空 = 使用 SDK wheel 内置 runtime exe；也可填显式路径覆盖。
-# 例: runtimeExe = "D:/others/DSH/resources/runtime/cli/bin/dsh.cmd"
+provider = "deepseek-official"
+model = "deepseek-flash"
+# low | high | max
+reasoningEffort = "high"
+# 单次输出上限（D-028：384000）。
+maxTokens = 384000
+# 上下文窗口（运行时 request/context 缺失时用于 session.meta 兜底）。
+contextWindowTokens = 1000000
+# D-022：空 = 自动解析（已安装 DSH → wheel 内置 runtime）；
+# 也可填显式路径覆盖，例: runtimeExe = "D:/others/DSH/resources/runtime/cli/bin/dsh.cmd"
 runtimeExe = ""
-# 可选：API 凭据（留空则使用 SDK/环境默认）。apiKey 不会写入日志。
+# 可选：API 凭据；留空回退 DEEPSEEK_API_KEY / DSH_PHONE_API_KEY。不会写入日志。
 apiKey = ""
-baseUrl = ""
+baseUrl = "https://api.deepseek.com"
 
 [asr]
 mode = "fake"

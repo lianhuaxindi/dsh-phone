@@ -1,10 +1,11 @@
 # DSH Phone（DSH 随身）
 
-把电脑上的 DeepSeek Harness 变成手机上的「随身终端」：打字 + 蓝牙麦语音实时输入 + 流式回复 + 审批。
+把电脑上的 DeepSeek Harness 变成手机上的「随身终端」：打字 + **拍照/传图** + 蓝牙麦语音实时输入 + 流式回复 + 审批。
 
-- **手机端**：Android App（Kotlin 原生壳 + WebView HTML/JS UI）
-- **电脑端**：Python Bridge 进程（WSS 服务端 + 配对认证 + ASR + DSH SDK）
+- **手机端**：Android App（Kotlin 原生壳 + WebView HTML/JS UI），UI 对齐 DeepSeek 官方手机端，顶部显示 **模型 / 思考强度 / 上下文占用**
+- **电脑端**：Python Bridge 进程（WSS 服务端 + 配对认证 + ASR + DSH SDK），**默认接真模型** `deepseek-flash`（DeepSeek-V4.1-Flash，1M 上下文，支持 Vision）
 - **链路**：`App ⇄ wss(dsphone.v1) ⇄ Bridge ⇄ deepseek-harness-sdk ⇄ dsh --profile sdk`
+- **配对**：手机**扫码**电脑端输出的二维码（`bridge/state/qr.png`）即可；同一二维码里带 `hosts=` 多地址，换 Wi-Fi / 公共网络会自动逐个尝试并记住可用地址
 
 > 详细需求见 [docs/PRD.md](docs/PRD.md)；协议见 [docs/PROTOCOL.md](docs/PROTOCOL.md)；架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)；
 > **交付/验收/已知坑见 [docs/HANDOVER.md](docs/HANDOVER.md)**；决策见 [docs/DECISIONS.md](docs/DECISIONS.md)。
@@ -52,6 +53,8 @@ $py = 'D:\anaconda3\envs\scisim-agent\python.exe'
 & $py -m bridge --config bridge\config.example.toml --host 10.5.19.39
 ```
 
+启动后控制台会打印**配对码 / 64 位指纹 / 配对 URI**，并把同一份信息渲染成二维码图片 `bridge\state\qr.png`（手机 App 的「扫码配对」直接扫它）。要接真模型只需给 `[dsh] apiKey` 填值（或用环境变量 `DEEPSEEK_API_KEY`）；模型默认 `deepseek-flash`（DeepSeek-V4.1-Flash，1M 上下文）。
+
 手机端 UI 可以先在浏览器里看（mock 模式，不需要手机）：`cd app\web; python -m http.server 8123` → 打开 <http://127.0.0.1:8123/?transport=mock>（配对码 `123456`）。
 完整上手、真 ASR 验证、出 APK、已知坑与「未验证清单」见 **[docs/HANDOVER.md](docs/HANDOVER.md)**。
 
@@ -61,33 +64,38 @@ $py = 'D:\anaconda3\envs\scisim-agent\python.exe'
 
 ```
 app\android\app\build\outputs\apk\debug\app-debug.apk
-→ 3,867,632 B  ·  com.dsh.phone 1.0.0 (10000)  ·  minSdk 29 / targetSdk 35
+→ 4,578,710 B · sha256 A45C164E…E726704601 · com.dsh.phone 1.1.0 (10100) · minSdk 29 / targetSdk 35
+→ 内含 assets/web 26 个文件（sync_web 同步的 WebView UI）
 ```
 
+安装：`adb install -r app\android\app\build\outputs\apk\debug\app-debug.apk`（或把 APK 传到手机点击安装，需允许「安装未知来源」）。
+
 重新出包 / 第一次在新机器上装工具链 / 沙箱下跑单测的完整步骤见 **[app/android/BUILD-LOCAL.md](app/android/BUILD-LOCAL.md)**（12 章，含可复制命令与故障排查表）；决策记录见 `docs/DECISIONS.md` 的 D-027。
+
+配真实模型只需要一步：编辑 `bridge\config.local.toml`（一键脚本生成）或复制 `bridge\config.example.toml` 后填 `[dsh] apiKey = "sk-..."`；也可以设环境变量 `DEEPSEEK_API_KEY` / `DSH_PHONE_API_KEY`（详见 D-028）。
 
 ## 开发状态
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | M0 Phase0 | 仓库骨架、协议冻结、SDK spike | ✅ 完成 |
-| M1 | Bridge 骨架 + 配对认证 + WSS + 假/真 ASR + DSH SDK 接线 | ✅ 完成（114 tests） |
-| M2 | App 壳 + WebView UI + 文本聊天 + JsBridge 契约 | ✅ 代码完成（122 web tests + 4 个静态自检） |
-| M3 | 真录音 + 蓝牙路由 + PTT + partial/定稿 | ⏳ APK 已构建（53 单测绿），待真机按 runbook 验收 |
+| M1 | Bridge 骨架 + 配对认证 + WSS + 假/真 ASR + 真模型/图片/用量 + DSH SDK 接线 | ✅ 完成（146 tests） |
+| M2 | App 壳 + WebView UI + 文本聊天 + JsBridge 契约 + v1.1 扫码/取图/顶栏三要素 | ✅ 代码完成（144 web tests + 4 个静态自检 + APK 1.1.0） |
+| M3 | 真录音 + 蓝牙路由 + PTT + partial/定稿 | ⏳ APK 已构建（71 单测绿），待真机按 runbook 验收 |
 | M4 | 审批/提问、重连、诊断、CI 出 APK | ✅ 代码与 CI 配置完成；APK 已改由本机构建；GitHub Actions 被账号 billing lock 阻塞（D-026） |
 
 ## 验证命令（提交前）
 
 ```powershell
 $py = 'D:\anaconda3\envs\scisim-agent\python.exe'
-& $py -m pytest bridge\tests -q -p no:cacheprovider        # 114 passed
-& $py -m bridge --self-test                                 # 5 PASS
+& $py -m pytest bridge\tests -q -p no:cacheprovider        # 146 passed
+& $py -m bridge --self-test                                 # 6 PASS / 1 SKIP（apiKey 未配）
 & $py scripts\e2e_phone_sim.py --asr fake                   # 21 checks PASS（模拟手机走完整协议）
-cd app\web; node --test --test-isolation=none "tests/*.test.js"; cd ..   # 122 pass
+cd app\web; node --test --test-isolation=none "tests/*.test.js"; cd ..   # 144 pass
 foreach ($s in 'verify_protocol','check_contract','check_kotlin_static','check_gradle_config') {
-  & $py "app\android\tools\$s.py" }                         # 全 OK
+  & $py "app\android\tools\$s.py" }                         # 101 checks / 17 ops / 25 files / 67 checks 全 OK
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File ci\run_tests.ps1 -AllowMissing
-# Android 构建 / 单测：见 app\android\BUILD-LOCAL.md（本机 53 单测绿、APK 3.87 MB）
+# Android 构建 / 单测：见 app\android\BUILD-LOCAL.md（本机 71 单测绿、APK 4.58 MB）
 ```
 
 ## 开发约定

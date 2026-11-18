@@ -10,6 +10,7 @@
  */
 
 import {
+  MEDIA,
   MsgType,
   PROTOCOL,
   errorSpec,
@@ -17,6 +18,10 @@ import {
   normalizeSessionList,
   normalizeMessageList,
   normalizeSession,
+  normalizeSessionMeta,
+  normalizeUsage,
+  normalizeMediaData,
+  validateChatImages,
   normalizeApprovalRequest,
   normalizeQuestionRequest,
   randomUuid,
@@ -66,6 +71,9 @@ export const ControllerEvent = Object.freeze({
   LOGS_EXPORTED: 'logs-exported',
   SCAN_RESULT: 'scan-result',
   RECONNECTING: 'reconnecting',
+  CHAT_META: 'chat-meta',
+  PENDING_IMAGES: 'pending-images',
+  MEDIA: 'media',
 });
 
 /** Default request timeout in milliseconds. */
@@ -110,6 +118,19 @@ export class Controller {
     this.messages = new Map();
     /** @type {Map<string, string>} composer drafts per session (TC-WEB-03) */
     this._drafts = new Map();
+    /** @type {Map<string, object>} last `session.meta` per session (v1.1 top bar) */
+    this._sessionMeta = new Map();
+    /** @type {Map<string, object>} last `assistant.done.usage` per session */
+    this._sessionUsage = new Map();
+    /** @type {Map<string, object>} resolved media bytes (v1.1 image cache) */
+    this._mediaCache = new Map();
+    /** @type {Map<string, object>} local optimistic images not yet acknowledged */
+    this._localMedia = new Map();
+    /** @type {object[]} images attached to the next message */
+    this._pendingImages = [];
+    this._imageSeq = 0;
+    /** @type {string|null} session id of the active top-bar meta */
+    this._metaSessionId = null;
     /** @type {object|null} */
     this.approval = null;
     /** @type {object|null} */
@@ -129,6 +150,8 @@ export class Controller {
     this._onlineHandled = false;
     this._pendingPair = null;
     this._pairRequested = false;
+    this._connectHosts = [];
+    this._connectDiagnostics = null;
     this._reconnectAttempt = 0;
     this._reconnectTimer = null;
     this._approvalTimer = null;
@@ -227,6 +250,8 @@ export class Controller {
       recording: { ...this.recording },
       audioRoute: { ...this.audioRoute },
       latency: this.diagnostics.latencyStats(),
+      chatMeta: this.chatMetaFor(this.activeSessionId),
+      pendingImages: this._pendingImages.map((image) => ({ ...image })),
       online: isOnline(this.state),
       canSend: canStartTurn(this.state),
       canRecord: canRecord(this.state),
@@ -236,6 +261,180 @@ export class Controller {
   /** Messages for one session (empty array when unknown). */
   messagesFor(sessionId) {
     return (this.messages.get(sessionId) ?? []).map((message) => ({ ...message }));
+  }
+
+  /* ------------------------------------------- v1.1 chat meta & images */
+
+  /**
+   * Top-bar data for a session (D-032): model, thinking effort and context
+   * usage. Returns null until the server sent `session.meta`/`usage` for it, so
+   * the UI can hide the row on a fresh session and reset when switching.
+   */
+  chatMetaFor(sessionId) {
+    if (!sessionId) return null;
+    const meta = this._sessionMeta.get(sessionId) ?? null;
+    const usage = this._sessionUsage.get(sessionId) ?? null;
+    if (!meta && !usage) return null;
+    const contextWindow =
+      (usage && Number(usage.contextWindow) > 0 ? usage.contextWindow : null) ||
+      (meta && Number(meta.contextWindow) > 0 ? meta.contextWindow : null) ||
+      MEDIA.defaultContextWindow;
+    const estimated = !(usage?.contextWindow > 0 || meta?.contextWindow > 0);
+    const usedTokens = usage ? usage.usedTokens ?? usage.totalTokens ?? null : null;
+    const percent = usedTokens === null
+      ? null
+      : Math.max(0, Math.min(100, Math.round((usedTokens / contextWindow) * 1000) / 10));
+    const model = meta?.model ?? null;
+    return {
+      sessionId,
+      provider: meta?.provider ?? null,
+      model,
+      modelLabel: model ? MEDIA.modelLabels[model] ?? model : null,
+      reasoningEffort: meta?.reasoningEffort ?? null,
+      contextWindow,
+      usedTokens,
+      percent,
+      estimated,
+      usage: usage ? { ...usage } : null,
+    };
+  }
+
+  /** Emit the top-bar data for the active session (no-op when none). */
+  _emitChatMeta() {
+    const meta = this.chatMetaFor(this.activeSessionId);
+    this.emit(ControllerEvent.CHAT_META, { sessionId: this.activeSessionId, meta });
+  }
+
+  /** Emit the composer attachment list. */
+  _emitPendingImages() {
+    this.emit(ControllerEvent.PENDING_IMAGES, { images: this._pendingImages.map((image) => ({ ...image })) });
+  }
+
+  /** Cached media bytes by id (null when not loaded yet). */
+  mediaFor(mediaId) {
+    const key = String(mediaId);
+    const record = this._mediaCache.get(key) ?? this._localMedia.get(key) ?? null;
+    return record ? { ...record } : null;
+  }
+
+  /**
+   * Resolve a message image (PROTOCOL §9 v1.1): memory cache → IndexedDB cache
+   * → `media.get`. Emits MEDIA with the record (or null on failure) and caches
+   * successful results in the store.
+   */
+  async loadMedia(mediaId) {
+    const key = String(mediaId ?? '');
+    if (!key) return null;
+    const cached = this.mediaFor(key);
+    if (cached) return cached;
+    try {
+      const stored = await this.store.getMedia(key);
+      if (stored) {
+        this._mediaCache.set(key, stored);
+        this.emit(ControllerEvent.MEDIA, { mediaId: key, media: stored });
+        return stored;
+      }
+    } catch (error) {
+      this.diagnostics.warn('media', `cache read failed: ${error?.message ?? error}`);
+    }
+    try {
+      const result = await this.transport.mediaGet(key);
+      if (result && result.ok && result.media) {
+        const record = { ...result.media };
+        this._mediaCache.set(key, record);
+        try {
+          await this.store.saveMedia(record);
+        } catch (error) {
+          this.diagnostics.warn('media', `cache write failed: ${error?.message ?? error}`);
+        }
+        this.emit(ControllerEvent.MEDIA, { mediaId: key, media: record });
+        return record;
+      }
+      this.diagnostics.warn('media', `media.get failed for ${key}: ${result?.reason ?? result?.code ?? 'unknown'}`);
+    } catch (error) {
+      this.diagnostics.warn('media', `media.get threw: ${error?.message ?? error}`);
+    }
+    this.emit(ControllerEvent.MEDIA, { mediaId: key, media: null });
+    return null;
+  }
+
+  /**
+   * Pick an image through the bridge (`pickImage` v1.1) and attach it to the
+   * next message. Enforces the PROTOCOL §9 limits client-side (≤4, ≤2MiB,
+   * JPEG/PNG/WEBP/GIF) before the bridge/server has to.
+   */
+  async attachImage(source = 'gallery') {
+    if (this._pendingImages.length >= MEDIA.maxImages) {
+      this.emit(ControllerEvent.TOAST, { key: 'chat.imageLimit', vars: { max: MEDIA.maxImages } });
+      return null;
+    }
+    let result;
+    try {
+      result = await this.transport.pickImage(source === 'camera' ? 'camera' : 'gallery');
+    } catch (error) {
+      this.diagnostics.warn('media', `pickImage threw: ${error?.message ?? error}`);
+      result = { ok: false, reason: 'unsupported' };
+    }
+    if (!result || !result.ok || typeof result.data !== 'string' || result.data.length === 0) {
+      const reason = result?.reason ?? 'unsupported';
+      this.emit(ControllerEvent.TOAST, { key: 'chat.imagePickFailed', vars: { reason } });
+      this.diagnostics.warn('media', `pickImage failed: ${reason}`);
+      return null;
+    }
+    const candidate = {
+      mimeType: String(result.mimeType ?? '').toLowerCase(),
+      data: result.data,
+      ...(typeof result.name === 'string' && result.name.trim() ? { name: result.name } : {}),
+      ...(Number.isInteger(result.width) && result.width > 0 ? { width: result.width } : {}),
+      ...(Number.isInteger(result.height) && result.height > 0 ? { height: result.height } : {}),
+    };
+    try {
+      validateChatImages([candidate]);
+    } catch (error) {
+      const message = String(error?.message ?? '');
+      const key = /at most|more than/i.test(message)
+        ? 'chat.imageLimit'
+        : /mimeType|format/i.test(message)
+          ? 'chat.imageInvalid'
+          : 'chat.imageTooLarge';
+      this.emit(ControllerEvent.TOAST, { key, vars: { max: MEDIA.maxImages } });
+      return null;
+    }
+    this._imageSeq += 1;
+    const image = {
+      id: `img-${this._imageSeq}`,
+      data: candidate.data,
+      mimeType: candidate.mimeType,
+      name: candidate.name ?? '',
+      width: candidate.width ?? 0,
+      height: candidate.height ?? 0,
+    };
+    this._localMedia.set(image.id, {
+      mediaId: image.id,
+      mimeType: image.mimeType,
+      data: image.data,
+      width: image.width,
+      height: image.height,
+      sizeBytes: Math.round((image.data.length * 3) / 4),
+    });
+    this._pendingImages.push(image);
+    this._emitPendingImages();
+    return image;
+  }
+
+  /** Remove one attachment by id. */
+  removeImage(imageId) {
+    const before = this._pendingImages.length;
+    this._pendingImages = this._pendingImages.filter((image) => image.id !== imageId);
+    if (this._pendingImages.length !== before) this._emitPendingImages();
+    return this._pendingImages.length !== before;
+  }
+
+  /** Drop all pending attachments (e.g. after sending or switching session). */
+  clearImages() {
+    if (this._pendingImages.length === 0) return;
+    this._pendingImages = [];
+    this._emitPendingImages();
   }
 
   /* ------------------------------------------------------- state helpers */
@@ -294,6 +493,24 @@ export class Controller {
         break;
       case TransportState.FAILED:
         this._dispatch(Action.CONNECT_FAILED, { error: detail ?? null });
+        if (detail?.reason === 'all_addresses_failed') {
+          // v1.1 (D-031): the native bridge tried host + hosts[] and all timed
+          // out; surface the per-address diagnostics so the user can act.
+          this.diagnostics.recordError({ code: 5001, message: detail.message ?? 'all addresses failed', retryable: true, source: 'connect' });
+          this._connectDiagnostics = {
+            at: this.now(),
+            message: detail.message ?? '',
+            reason: detail.reason,
+            tried: Array.isArray(detail.tried) ? detail.tried.map((entry) => ({ ...entry })) : [],
+          };
+          this.emit(ControllerEvent.ERROR, {
+            code: 5001,
+            scope: 'connect',
+            retryable: true,
+            message: detail.message ?? '',
+            tried: detail.tried ?? [],
+          });
+        }
         this.emit(ControllerEvent.STATE, this.snapshot());
         break;
       case TransportState.CLOSED:
@@ -402,13 +619,19 @@ export class Controller {
    * Start pairing from the pairing screen. Accepts a full `dsphone://pair?...`
    * URI in `uri` or individual fields; fields win over URI values.
    */
-  async connectPairing({ uri, host, port, fp, code, deviceName } = {}) {
+  async connectPairing({ uri, host, port, fp, code, deviceName, hosts } = {}) {
     try {
       const parsed = uri ? parsePairUri(uri) : null;
       const hostValue = validatePairingField('host', host ?? parsed?.host);
       const portValue = validatePairingField('port', port ?? parsed?.port);
       const fpValue = fp !== undefined && fp !== '' ? validatePairingField('fp', fp) : parsed?.fp ?? '';
       const codeValue = validatePairingField('code', code ?? parsed?.code);
+      // v1.1 / D-031: a scanned QR may carry `hosts[]` candidates; the native
+      // bridge tries host → hosts[] with a 3s timeout per address.
+      const hostList = (Array.isArray(hosts) ? hosts : parsed?.hosts ?? [])
+        .map((item) => String(item ?? '').trim())
+        .filter((item) => item && item !== hostValue && item !== parsed?.host);
+      this._connectHosts = Array.from(new Set(hostList)).slice(0, 8);
       this.settings = normalizeSettings({
         ...this.settings,
         host: hostValue,
@@ -432,12 +655,18 @@ export class Controller {
   _beginConnect() {
     this._dispatch(Action.CONNECT_REQUESTED);
     this.emit(ControllerEvent.STATE, this.snapshot());
-    this.transport.connect({
+    this.transport.connect(this._connectOptions());
+  }
+
+  /** Shared connect/reconnect options (v1.1 adds hosts[] candidates, D-031). */
+  _connectOptions() {
+    return {
       host: this.settings.host,
       port: this.settings.port,
       fp: this.settings.fp,
       deviceId: this.deviceId,
-    });
+      ...(this._connectHosts.length ? { hosts: [...this._connectHosts] } : {}),
+    };
   }
 
   /** Manual "reconnect" (diagnostics). */
@@ -447,25 +676,20 @@ export class Controller {
     this.diagnostics.info('transport', 'manual reconnect requested');
     this.emit(ControllerEvent.RECONNECTING, { attempt: 0, manual: true });
     try {
-      this.transport.reconnect({
-        host: this.settings.host,
-        port: this.settings.port,
-        fp: this.settings.fp,
-        deviceId: this.deviceId,
-      });
+      this.transport.reconnect(this._connectOptions());
     } catch (error) {
       this.emit(ControllerEvent.ERROR, { code: 5001, scope: 'transport', retryable: true, message: String(error?.message ?? error) });
     }
   }
 
-  /** Scan/paste pairing info; V1 native returns `supported:false`. */
+  /** Scan pairing QR (v1.1 / D-030); resolves `scanPairing.result` shape. */
   async scanPairing() {
     try {
       const result = await this.transport.scanPairing();
       this.emit(ControllerEvent.SCAN_RESULT, result);
       return result;
     } catch (error) {
-      const result = { supported: false, error: String(error?.message ?? error) };
+      const result = { ok: false, supported: false, reason: 'unsupported', error: String(error?.message ?? error) };
       this.emit(ControllerEvent.SCAN_RESULT, result);
       return result;
     }
@@ -545,12 +769,7 @@ export class Controller {
     this._reconnectTimer = this.scheduler.setTimeout(() => {
       this._reconnectTimer = null;
       this._dispatch(Action.CONNECT_REQUESTED);
-      this.transport.connect({
-        host: this.settings.host,
-        port: this.settings.port,
-        fp: this.settings.fp,
-        deviceId: this.deviceId,
-      });
+      this.transport.connect(this._connectOptions());
     }, delayMs);
   }
 
@@ -643,6 +862,8 @@ export class Controller {
   async openSession(sessionId) {
     if (!sessionId) return;
     this.activeSessionId = sessionId;
+    this._metaSessionId = sessionId;
+    this.clearImages();
     this.settings = normalizeSettings({ ...this.settings, lastActiveSessionId: sessionId });
     this.store.saveSettings(this.settings).catch(() => {});
     const local = await this.store.getMessages(sessionId);
@@ -656,6 +877,7 @@ export class Controller {
       session: this.sessions.find((s) => s.sessionId === sessionId) ?? null,
       draft,
     });
+    this._emitChatMeta();
     const response = await this._request(MsgType.SESSION_RESUME, { sessionId });
     if (response?.type === MsgType.SESSION_RESUME_OK) {
       const serverMessages = normalizeMessageListSafe(response.messages);
@@ -746,22 +968,56 @@ export class Controller {
 
   /* ---------------------------------------------------------------- chat */
 
-  /** Send a text turn. Returns the optimistic user message or null. */
+  /** Send a text turn (optionally with pending images). Returns the optimistic user message or null. */
   async sendText(text) {
+    const rawText = typeof text === 'string' ? text : '';
+    const pendingImages = this._pendingImages.map((image) => ({ ...image }));
+    const hasImages = pendingImages.length > 0;
     let value;
-    try {
-      value = validateChatText(text);
-    } catch (error) {
-      const raw = typeof text === 'string' ? text : '';
-      if (!raw.trim()) {
-        this.emit(ControllerEvent.TOAST, { key: 'chat.emptyBlocked' });
-      } else if (raw.length > PROTOCOL.maxTextChars) {
+    if (hasImages) {
+      if (rawText.length > PROTOCOL.maxTextChars) {
         this.emit(ControllerEvent.TOAST, { key: 'chat.tooLong', vars: { max: PROTOCOL.maxTextChars } });
-      } else {
-        this.emit(ControllerEvent.TOAST, { key: 'chat.emptyBlocked' });
+        return null;
       }
-      this.diagnostics.warn('chat', `send rejected: ${error?.message ?? error}`);
-      return null;
+      value = rawText;
+    } else {
+      try {
+        value = validateChatText(rawText);
+      } catch (error) {
+        if (!rawText.trim()) {
+          this.emit(ControllerEvent.TOAST, { key: 'chat.emptyBlocked' });
+        } else if (rawText.length > PROTOCOL.maxTextChars) {
+          this.emit(ControllerEvent.TOAST, { key: 'chat.tooLong', vars: { max: PROTOCOL.maxTextChars } });
+        } else {
+          this.emit(ControllerEvent.TOAST, { key: 'chat.emptyBlocked' });
+        }
+        this.diagnostics.warn('chat', `send rejected: ${error?.message ?? error}`);
+        return null;
+      }
+    }
+    const wireImages = hasImages
+      ? pendingImages.map((image) => ({
+          mimeType: image.mimeType,
+          data: image.data,
+          ...(image.name ? { name: image.name } : {}),
+          ...(image.width > 0 ? { width: image.width } : {}),
+          ...(image.height > 0 ? { height: image.height } : {}),
+        }))
+      : [];
+    if (hasImages) {
+      try {
+        validateChatImages(wireImages);
+      } catch (error) {
+        const message = String(error?.message ?? '');
+        const key = /at most|more than/i.test(message)
+          ? 'chat.imageLimit'
+          : /mimeType|format/i.test(message)
+            ? 'chat.imageInvalid'
+            : 'chat.imageTooLarge';
+        this.emit(ControllerEvent.TOAST, { key, vars: { max: MEDIA.maxImages } });
+        this.diagnostics.warn('chat', `images rejected: ${message}`);
+        return null;
+      }
     }
     if (!canStartTurn(this.state)) {
       this.emit(ControllerEvent.TOAST, { key: 'chat.notOnline' });
@@ -778,6 +1034,13 @@ export class Controller {
       this.activeSessionId = sessionId;
     }
     const clientId = randomUuid();
+    const optimisticImages = pendingImages.map((image) => ({
+      mediaId: image.id,
+      mimeType: image.mimeType,
+      width: image.width,
+      height: image.height,
+      sizeBytes: Math.round((image.data.length * 3) / 4),
+    }));
     const userMessage = {
       messageId: `local-${clientId}`,
       sessionId,
@@ -787,18 +1050,27 @@ export class Controller {
       createdAt: this.now(),
       clientId,
       local: true,
+      ...(optimisticImages.length > 0 ? { images: optimisticImages } : {}),
     };
     this._lastUserText = value;
     this.clearDraft(sessionId);
+    this._pendingImages = [];
+    this._emitPendingImages();
     this._addMessage(sessionId, userMessage);
     this._pendingTurn = { clientId, sessionId, userMessage, assistantMessageId: null };
     this._turnStartedAt = this.scheduler.now();
     this._firstDeltaSeen = false;
     this._dispatch(Action.SEND_STARTED);
-    this._touchSessionPreview(sessionId, value);
+    if (value) this._touchSessionPreview(sessionId, value);
     try {
-      this.transport.send({ type: MsgType.CHAT_SEND, clientId, sessionId, text: value });
-      this.diagnostics.info('chat', `sent clientId=${clientId} session=${sessionId}`);
+      this.transport.send({
+        type: MsgType.CHAT_SEND,
+        clientId,
+        sessionId,
+        text: value,
+        ...(wireImages.length > 0 ? { images: wireImages } : {}),
+      });
+      this.diagnostics.info('chat', `sent clientId=${clientId} session=${sessionId} images=${wireImages.length}`);
     } catch (error) {
       this._failTurn({ code: 5001, message: String(error?.message ?? error) });
       return null;
@@ -809,7 +1081,7 @@ export class Controller {
 
   /** Retry the last user turn (error banner action). */
   retryLastTurn() {
-    if (this._lastUserText) this.sendText(this._lastUserText);
+    if (this._lastUserText || this._pendingImages.length > 0) this.sendText(this._lastUserText);
   }
 
   /** Ask the server to cancel the in-flight turn. */
@@ -894,6 +1166,11 @@ export class Controller {
       this.store.saveMessage(target).catch(() => {});
     }
     const finishReason = message.finishReason ?? 'completed';
+    const usage = normalizeUsage(message.usage);
+    if (usage) {
+      this._sessionUsage.set(sessionId, usage);
+      this._emitChatMeta();
+    }
     if (this._turnStartedAt !== null) {
       this.diagnostics.latency(LATENCY.TURN_COMPLETE, this.scheduler.now() - this._turnStartedAt);
       this._turnStartedAt = null;
@@ -1033,6 +1310,18 @@ export class Controller {
       case MsgType.QUESTION_EXPIRED:
         this._onQuestionExpired(message);
         break;
+      case MsgType.SESSION_META:
+        this._onSessionMeta(message);
+        break;
+      case MsgType.MEDIA_DATA: {
+        // Transports normally resolve media.get internally; tolerate pass-through.
+        const media = normalizeMediaDataSafe(message);
+        if (media) {
+          this._mediaCache.set(media.mediaId, media);
+          this.emit(ControllerEvent.MEDIA, { mediaId: media.mediaId, media });
+        }
+        break;
+      }
       case MsgType.ASR_PARTIAL:
         this._onAsrPartial(message);
         break;
@@ -1054,12 +1343,72 @@ export class Controller {
     }
   }
 
+  /* -------------------------------------------------- v1.1 meta & images */
+
+  /** `session.meta` (PROTOCOL §9): model / effort / context window for the top bar. */
+  _onSessionMeta(message) {
+    let meta;
+    try {
+      meta = normalizeSessionMeta(message);
+    } catch (error) {
+      this.diagnostics.warn('meta', `invalid session.meta: ${error?.message ?? error}`);
+      return;
+    }
+    const sessionId = meta.sessionId;
+    this._sessionMeta.set(sessionId, meta);
+    this.diagnostics.debug(
+      'meta',
+      `session=${sessionId} model=${meta.model ?? '?'} effort=${meta.reasoningEffort ?? '?'} ctx=${meta.contextWindow ?? '?'}`,
+    );
+    if (sessionId === this.activeSessionId) this._emitChatMeta();
+    else this.emit(ControllerEvent.CHAT_META, { sessionId, meta: this.chatMetaFor(sessionId) });
+  }
+
+  /** Put attachments of a rejected turn back into the composer (4002 rollback). */
+  _rollbackTurnImages(pending) {
+    const message = pending?.userMessage;
+    if (!message) return;
+    if (Array.isArray(message.images)) {
+      for (const image of message.images) {
+        if (this._pendingImages.length >= MEDIA.maxImages) break;
+        if (this._pendingImages.some((pendingImage) => pendingImage.id === image.mediaId)) continue;
+        const record = this._localMedia.get(String(image.mediaId));
+        if (!record) continue;
+        this._pendingImages.push({
+          id: String(image.mediaId),
+          data: record.data,
+          mimeType: record.mimeType,
+          name: '',
+          width: record.width,
+          height: record.height,
+        });
+      }
+    }
+    message.status = 'error';
+    this._emitMessageUpdated(pending.sessionId, message);
+    this._emitPendingImages();
+    this.diagnostics.warn('chat', `turn rejected before model (code 4002), attachments restored`);
+  }
+
   _handleErrorFrame(message) {
     const code = Number(message.code ?? 5001);
     const retryable = Boolean(message.retryable ?? errorSpec(code).retryable);
     this.diagnostics.recordError({ code, message: message.message ?? '', retryable, source: 'protocol' });
     if (code === 3001) this.refreshSessions();
     if (code === 1001) this._clearToken();
+    if (code === 4002 && this._pendingTurn) {
+      // v1.1: an invalid image turn is rejected before the model runs. Mark the
+      // optimistic user bubble as failed and put the attachments back so the
+      // user can fix/retry them (PROTOCOL §12, D-029).
+      this._rollbackTurnImages(this._pendingTurn);
+      this._pendingTurn = null;
+      this._streaming = null;
+      try {
+        this._dispatch(Action.TURN_ERROR, { error: { code, message: message.message ?? '' } });
+      } catch {
+        /* state machine already reset */
+      }
+    }
     if (this._pendingTurn && (code === 4001 || code === 2001 || code === 3003)) {
       this._pendingTurn = null;
       this._streaming = null;
@@ -1067,7 +1416,7 @@ export class Controller {
     }
     this.emit(ControllerEvent.ERROR, {
       code,
-      scope: message.scope ?? 'protocol',
+      scope: message.scope ?? (code === 4002 || code === 3003 ? 'chat' : 'protocol'),
       retryable,
       message: message.message ?? '',
       canRetry: code === 4001 || code === 3003 || code === 2001,
@@ -1348,6 +1697,7 @@ export class Controller {
       serverId: this.connection.detail?.serverId ?? null,
       latency: this.diagnostics.latencyStats(),
       errors: this.diagnostics.recentErrors(),
+      connectDiagnostics: this._connectDiagnostics ? { ...this._connectDiagnostics, tried: [...this._connectDiagnostics.tried] } : null,
       settings: {
         host: this.settings.host,
         port: this.settings.port,
@@ -1393,5 +1743,13 @@ function normalizeMessageListSafe(messages) {
     return normalizeMessageList(messages);
   } catch {
     return [];
+  }
+}
+
+function normalizeMediaDataSafe(message) {
+  try {
+    return normalizeMediaData(message);
+  } catch {
+    return null;
   }
 }

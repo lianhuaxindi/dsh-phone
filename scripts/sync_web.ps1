@@ -5,7 +5,7 @@
 .DESCRIPTION
   源目录  : app/web/                              （web-ui 模块负责产出）
   目标目录: app/android/app/src/main/assets/web/  （生成物，.gitignore 已忽略）
-  排除项  : tests/、node_modules/、*.md、package.json（前端工具文件，不进 APK）
+  排除项  : tests/、node_modules/、*.md、package.json、*.tmp（前端工具/编辑器临时文件，不进 APK）
   幂等    : 复制新增/变更文件、删除目标目录中的陈旧文件；重复执行结果一致。
 
   行为约定：
@@ -49,7 +49,7 @@ if ($UsingDefaultDestination) {
     $DestinationPath = Join-Path $RepoRoot 'app\android\app\src\main\assets\web'
 }
 
-$ExcludedDescription = 'tests/, node_modules/, *.md, package.json'
+$ExcludedDescription = 'tests/, node_modules/, *.md, package.json, *.tmp'
 
 function Write-Step([string]$Message) {
     Write-Host "[sync_web] $Message"
@@ -66,6 +66,9 @@ function Test-ExcludedPath([string]$RelativePath) {
     if ($p -match '\.md$') { return $true }
     # package.json 只是给 node --test 识别 ESM 用的前端工具文件，运行时不需要。
     if ($p -match '(^|/)package\.json$') { return $true }
+    # 编辑器原子写残留的 *.tmp（如 .transport.js.<pid>.<guid>.tmp）不是运行时资源，
+    # 且可能在扫描与复制之间消失（web-ui 并发编辑会触发 Copy-Item 竞态），必须跳过。
+    if ($p -match '\.tmp$') { return $true }
     if ($p -match '^tests/') { return $true }
     if ($p -match '(^|/)node_modules/') { return $true }
     return $false
@@ -112,6 +115,7 @@ $Files = New-Object System.Collections.ArrayList
 $SkippedCount = 0
 $SkippedMdCount = 0
 $SkippedPackageJsonCount = 0
+$SkippedTmpCount = 0
 foreach ($item in (Get-ChildItem -LiteralPath $SourceFull -Recurse -File -Force | Sort-Object -Property FullName)) {
     $relative = Get-RelativePath $SourcePrefix $item.FullName
     $relative = $relative -replace '\\', '/'
@@ -119,6 +123,7 @@ foreach ($item in (Get-ChildItem -LiteralPath $SourceFull -Recurse -File -Force 
         $SkippedCount++
         if ($relative -match '\.md$') { $SkippedMdCount++ }
         if ($relative -match '(^|/)package\.json$') { $SkippedPackageJsonCount++ }
+        if ($relative -match '\.tmp$') { $SkippedTmpCount++ }
         continue
     }
     [void]$Files.Add([pscustomobject]@{
@@ -175,7 +180,7 @@ if ($VerifyOnly) {
     }
     Write-Step "源目录   : $SourceFull"
     Write-Step "目标目录 : $DestinationFull"
-    Write-Step "排除项   : $ExcludedDescription（跳过 $SkippedCount 个，其中 *.md $SkippedMdCount 个、package.json $SkippedPackageJsonCount 个）"
+    Write-Step "排除项   : $ExcludedDescription（跳过 $SkippedCount 个，其中 *.md $SkippedMdCount 个、package.json $SkippedPackageJsonCount 个、*.tmp $SkippedTmpCount 个）"
     Write-Step "校验通过: 目标目录已是最新（$($Files.Count) 个文件）: $DestinationFull"
     exit 0
 }
@@ -184,6 +189,7 @@ if ($VerifyOnly) {
 New-Item -ItemType Directory -Force -Path $DestinationFull | Out-Null
 $copied = 0
 $unchanged = 0
+$vanished = 0
 $kept = @{}
 foreach ($file in $Files) {
     $kept[$file.Relative.ToLowerInvariant()] = $true
@@ -196,8 +202,20 @@ foreach ($file in $Files) {
         $unchanged++
         continue
     }
-    Copy-Item -LiteralPath $file.FullName -Destination $target -Force
-    $copied++
+    try {
+        Copy-Item -LiteralPath $file.FullName -Destination $target -Force
+        $copied++
+    }
+    catch {
+        # 并发编辑（web-ui 保存/删除源文件）时源可能消失：跳过并在汇总里报告，下一次 verify 会兜底。
+        if (-not (Test-Path -LiteralPath $file.FullName -PathType Leaf)) {
+            Write-Host "[sync_web][WARN] 源文件在同步过程中消失，已跳过: $($file.Relative)" -ForegroundColor Yellow
+            $vanished++
+        }
+        else {
+            throw
+        }
+    }
 }
 
 # 清理目标目录中的陈旧文件（源已删除/被排除）
@@ -227,7 +245,7 @@ if (-not (Test-Path -LiteralPath $destinationIndex -PathType Leaf)) {
 
 Write-Step "源目录   : $SourceFull"
 Write-Step "目标目录 : $DestinationFull"
-Write-Step "排除项   : $ExcludedDescription（跳过 $SkippedCount 个，其中 *.md $SkippedMdCount 个、package.json $SkippedPackageJsonCount 个）"
-Write-Step "同步完成 : 共 $($Files.Count) 个文件（复制 $copied，未变 $unchanged，清理陈旧 $removed）"
+Write-Step "排除项   : $ExcludedDescription（跳过 $SkippedCount 个，其中 *.md $SkippedMdCount 个、package.json $SkippedPackageJsonCount 个、*.tmp $SkippedTmpCount 个）"
+Write-Step "同步完成 : 共 $($Files.Count) 个文件（复制 $copied，未变 $unchanged，清理陈旧 $removed，同步中消失 $vanished）"
 Write-Step "OK: $destinationIndex"
 exit 0

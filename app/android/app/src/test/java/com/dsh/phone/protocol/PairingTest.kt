@@ -110,4 +110,51 @@ class PairingTest {
         assertEquals(false, Pairing.isPairingCode("1234567"))
         assertEquals(false, Pairing.isPairingCode("12 456"))
     }
+
+    /* -------------------------------------------------- v1.1 hosts / name */
+
+    @Test
+    fun parsesHostsAndNameFromV11Uri() {
+        val info = Pairing.parseUri(
+            pairingUri(
+                extra = "&code=123456&sid=srv-1a2b" +
+                    "&hosts=192.168.1.10,10.5.19.39,10.5.19.40&name=KQ-PC",
+            ),
+        )
+        // The primary host is not repeated in the candidate list.
+        assertEquals(listOf("10.5.19.39", "10.5.19.40"), info.hosts)
+        assertEquals("KQ-PC", info.name)
+    }
+
+    @Test
+    fun hostsAndNameAreOptional() {
+        val info = Pairing.parseUri(pairingUri())
+        assertEquals(emptyList<String>(), info.hosts)
+        assertNull(info.name)
+    }
+
+    @Test
+    fun parseHostsSkipsInvalidEntriesAndPrimary() {
+        val hosts = Pairing.parseHosts(
+            raw = "10.0.0.2, 0.0.0.0,,10.0.0.2,192.168.1.10,10.0.0.3:9,10.0.0.4",
+            primary = "192.168.1.10",
+        )
+        assertEquals(listOf("10.0.0.2", "10.0.0.4"), hosts)
+    }
+
+    @Test
+    fun parseHostsCapsTheCandidateList() {
+        val raw = (2..40).joinToString(",") { "10.0.0.$it" }
+        assertEquals(16, Pairing.parseHosts(raw).size)
+    }
+
+    @Test
+    fun isCandidateHostFiltersUnusableAddresses() {
+        assertEquals(true, Pairing.isCandidateHost("192.168.1.10"))
+        assertEquals(false, Pairing.isCandidateHost(""))
+        assertEquals(false, Pairing.isCandidateHost("0.0.0.0"))
+        assertEquals(false, Pairing.isCandidateHost("::"))
+        assertEquals(false, Pairing.isCandidateHost("http://host"))
+        assertEquals(false, Pairing.isCandidateHost("host name"))
+    }
 }

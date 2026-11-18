@@ -47,7 +47,7 @@ async def test_hello_ok(server) -> None:
         msg = await hello(tc)
         assert msg["replyTo"] == 1
         assert msg["serverId"] == server.server_id
-        assert msg["bridge"] == "1.0.0"
+        assert msg["bridge"] == "1.1.0"
         assert msg["needPair"] is True
         assert msg["authRequired"] is True
         assert isinstance(msg["ts"], int)

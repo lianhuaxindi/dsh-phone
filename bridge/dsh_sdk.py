@@ -39,6 +39,7 @@ from .dsh import (
     DshDone,
     DshError,
     DshEvent,
+    DshMeta,
     DshQuestion,
     DshSession,
     DshTool,
@@ -131,11 +132,19 @@ class _QuestionSlot:
 class SdkTurn(DshTurn):
     """一次真实 SDK turn：消费通知 → 映射为 Bridge 事件。"""
 
-    def __init__(self, client: "SdkDshClient", session_id: str, text: str) -> None:
+    def __init__(
+        self,
+        client: "SdkDshClient",
+        session_id: str,
+        text: str,
+        *,
+        images: list[dict[str, Any]] | None = None,
+    ) -> None:
         super().__init__()
         self.client = client
         self.session_id = session_id
         self.text = text
+        self.images = images or []
         self.cancel_supported = False  # D-019：SDK 无 cancel
         self.finish_reason = "completed"
         self._loop = asyncio.get_running_loop()
@@ -146,6 +155,16 @@ class SdkTurn(DshTurn):
         self._approvals: dict[str, _ApprovalSlot] = {}
         self._questions: dict[str, _QuestionSlot] = {}
         self._lock = threading.Lock()
+        # v1.1：运行时元信息与 token 用量（D-032）。
+        config = getattr(client, "config", None)
+        self._meta: dict[str, Any] = {
+            "provider": (getattr(config, "provider", "") or "") or None,
+            "model": (getattr(config, "model", "") or "") or None,
+            "reasoning_effort": (getattr(config, "reasoning_effort", "") or "") or None,
+            "context_window": getattr(config, "context_window_tokens", 0) or None,
+        }
+        self._meta_sent: tuple[Any, ...] | None = None
+        self._usage: dict[str, Any] | None = None
 
     # -- 生命周期 ---------------------------------------------------------
 
@@ -180,6 +199,75 @@ class SdkTurn(DshTurn):
         if item is _END:
             raise StopAsyncIteration
         return item
+
+    # -- 元信息 / 用量 -----------------------------------------------------
+
+    def _meta_tuple(self) -> tuple[Any, ...]:
+        return (
+            self._meta.get("provider"),
+            self._meta.get("model"),
+            self._meta.get("reasoning_effort"),
+            self._meta.get("context_window"),
+        )
+
+    def _emit_meta_if_needed(self) -> None:
+        """把最近一次运行时元信息映射为 ``session.meta``（变化才发）。"""
+        tuple_now = self._meta_tuple()
+        if tuple_now == self._meta_sent:
+            return
+        if not any(value is not None for value in tuple_now):
+            return
+        self._meta_sent = tuple_now
+        self._inject(
+            DshMeta(
+                provider=self._meta.get("provider"),
+                model=self._meta.get("model"),
+                reasoning_effort=self._meta.get("reasoning_effort"),
+                context_window=self._meta.get("context_window"),
+            )
+        )
+
+    def _update_meta(self, **fields: Any) -> None:
+        changed = False
+        for key, value in fields.items():
+            if value is None or key not in self._meta:
+                continue
+            if self._meta[key] != value:
+                self._meta[key] = value
+                changed = True
+        if changed:
+            self._emit_meta_if_needed()
+
+    @staticmethod
+    def _normalize_usage(raw: Any, meta: dict[str, Any]) -> dict[str, Any] | None:
+        if not isinstance(raw, dict):
+            return None
+        usage: dict[str, Any] = {}
+        for key in (
+            "inputTokens",
+            "outputTokens",
+            "totalTokens",
+            "cacheReadTokens",
+            "cacheWriteTokens",
+            "reasoningTokens",
+        ):
+            value = raw.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                usage[key] = value
+        if not usage:
+            return None
+        if "usedTokens" not in usage:
+            total = usage.get("totalTokens")
+            if total is not None:
+                usage["usedTokens"] = total
+            elif "inputTokens" in usage or "outputTokens" in usage:
+                usage["usedTokens"] = usage.get("inputTokens", 0) + usage.get(
+                    "outputTokens", 0
+                )
+        context_window = meta.get("context_window")
+        if isinstance(context_window, int):
+            usage["contextWindow"] = context_window
+        return usage
 
     # -- 通知处理（SDK 线程） ---------------------------------------------
 
@@ -228,14 +316,38 @@ class SdkTurn(DshTurn):
             text = _assistant_text(data)
             if text:
                 self._text_parts.append(text)
+            usage = self._normalize_usage(data.get("usage"), self._meta)
+            if usage is not None:
+                self._usage = usage
         elif etype == "turn/end":
             reason = data.get("reason") if isinstance(data.get("reason"), dict) else {}
             kind = reason.get("kind")
             self._finish_kind = kind if isinstance(kind, str) else None
+            usage = self._normalize_usage(data.get("usage"), self._meta)
+            if usage is not None:
+                self._usage = usage
+        elif etype == "request/context":
+            self._update_meta(
+                provider=data.get("provider") or None,
+                model=data.get("model") or None,
+                context_window=data.get("contextWindow") or None,
+            )
+        elif etype == "model/selection":
+            self._update_meta(reasoning_effort=data.get("reasoningEffort") or None)
+
+    def _run_input(self) -> Any:
+        """构造 ``Session.run`` 输入：纯文本用 str，带图片用内容块数组。"""
+        if not self.images:
+            return self.text
+        blocks: list[dict[str, Any]] = []
+        if self.text:
+            blocks.append({"type": "text", "text": self.text})
+        blocks.extend(self.images)
+        return blocks
 
     def _sync_run(self, harness: Any) -> Any:
         return harness.run(
-            self.text,
+            self._run_input(),
             session_id=self.session_id,
             on_notification=self.on_notification,
         )
@@ -243,6 +355,7 @@ class SdkTurn(DshTurn):
     async def _run(self) -> None:
         loop = asyncio.get_running_loop()
         result: Any = None
+        self._emit_meta_if_needed()
         try:
             result = await loop.run_in_executor(
                 self.client.executor, self._sync_run, self.client.harness
@@ -272,7 +385,7 @@ class SdkTurn(DshTurn):
             self.finish_reason = "cancelled" if kind == "cancelled" else "completed"
             if text:
                 self._emit(DshDelta(text))
-            self._emit(DshDone(finish_reason=self.finish_reason))
+            self._emit(DshDone(finish_reason=self.finish_reason, usage=self._usage))
         self._emit(_END)
 
     # -- 审批 / 提问回填 ---------------------------------------------------
@@ -483,6 +596,9 @@ class SdkDshClient(DshClient):
             "dsh_home": str(self.home),
             "approval_requests": True,
             "on_user_question": self._on_user_question,
+            # D-028：真实模型默认参数
+            "reasoning_effort": self.config.reasoning_effort,
+            "max_tokens": self.config.max_tokens,
         }
         if resolution.source != "bundled":
             # bundled 由 SDK 自己按 wheel 内路径解析；其余来源显式传给 SDK
@@ -535,8 +651,13 @@ class SdkDshClient(DshClient):
         # SDK 无 list_sessions：会话列表以 Bridge 的 history.sqlite3 为准
         return []
 
-    def start_turn(self, session_id: str, text: str) -> SdkTurn:
-        turn = SdkTurn(self, session_id, text)
+    def start_turn(
+        self,
+        session_id: str,
+        text: str,
+        images: list[dict[str, Any]] | None = None,
+    ) -> SdkTurn:
+        turn = SdkTurn(self, session_id, text, images=images)
         turn.start()
         return turn
 

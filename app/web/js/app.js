@@ -222,22 +222,90 @@ export class WebApp {
     this.overlayRoot = h('div', { class: 'overlay-root' });
     this.sheetRoot = h('div', { class: 'sheet-root' });
 
-    this.root.append(
-      h(
-        'div',
-        { class: 'app' },
-        h('header', { class: 'topbar' }, h('div', { class: 'brand' }, this.brandTitle, this.brandSub), h('div', { class: 'topbar__chips' }, this.routeChip, this.connChip)),
-        this.connBanner,
-        this.demoBanner,
-        this.screenHost,
-        nav,
-        this.overlayRoot,
-        this.sheetRoot,
-        this.toastRoot,
-      ),
+    // Sessions drawer (DeepSeek-style sidebar): reuses SessionsView inside a
+    // slide-over panel opened from the chat header.
+    this.drawerHost = h('div', { class: 'drawer__host' });
+    this.drawerTitle = h('h2', { class: 'drawer__title' }, t('sessions.title'));
+    this.drawerClose = h(
+      'button',
+      {
+        type: 'button',
+        class: 'icon-button',
+        'aria-label': t('common.close'),
+        title: t('common.close'),
+        onclick: () => this.closeDrawer(),
+      },
+      '×',
     );
+    this.drawer = h(
+      'aside',
+      { class: 'drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': t('sessions.title') },
+      h('header', { class: 'drawer__header' }, this.drawerTitle, this.drawerClose),
+      this.drawerHost,
+    );
+    this.drawerBackdrop = h('div', { class: 'drawer-backdrop', onclick: () => this.closeDrawer() });
+    this.drawerRoot = h('div', { class: 'drawer-root' }, this.drawerBackdrop, this.drawer);
+    this.drawerRoot.hidden = true;
+
+    this.topbar = h(
+      'header',
+      { class: 'topbar' },
+      h('div', { class: 'brand' }, this.brandTitle, this.brandSub),
+      h('div', { class: 'topbar__chips' }, this.routeChip, this.connChip),
+    );
+    this.appEl = h(
+      'div',
+      { class: 'app' },
+      this.topbar,
+      this.connBanner,
+      this.demoBanner,
+      this.screenHost,
+      nav,
+      this.overlayRoot,
+      this.sheetRoot,
+      this.toastRoot,
+      this.drawerRoot,
+    );
+    this.root.append(this.appEl);
+    this.nav = nav;
+    this.drawerInstance = null;
 
     this.root.setAttribute('data-app-ready', 'false');
+  }
+
+  /* ------------------------------------------------------------- drawer */
+
+  /** Open the sessions drawer (chat header menu). */
+  openDrawer() {
+    if (!this.drawerRoot || !this.controller) return;
+    this.drawerInstance?.destroy?.();
+    const view = new SessionsView({
+      root: this.drawerHost,
+      controller: this.controller,
+      toast: this.toast,
+      onOpen: (sessionId) => {
+        this.closeDrawer();
+        this._openChat(sessionId);
+      },
+      onNew: () => {
+        this.closeDrawer();
+        this._newChat();
+      },
+    });
+    view.mount();
+    this.drawerInstance = view;
+    this.drawerRoot.hidden = false;
+    this.drawer.classList.add('drawer--open');
+    this.drawerClose.focus?.();
+  }
+
+  /** Close the sessions drawer. */
+  closeDrawer() {
+    if (!this.drawerRoot || this.drawerRoot.hidden) return;
+    this.drawerRoot.hidden = true;
+    this.drawer.classList.remove('drawer--open');
+    this.drawerInstance?.destroy?.();
+    this.drawerInstance = null;
   }
 
   _buildDemoTools() {
@@ -357,6 +425,7 @@ export class WebApp {
   show(screen) {
     if (!Object.values(SCREEN).includes(screen)) return;
     if (this.screen === screen && this.view) return;
+    this.closeDrawer?.();
     this._previousScreen = this.screen ?? SCREEN.SESSIONS;
     this.view?.destroy?.();
     this.view = null;
@@ -368,6 +437,15 @@ export class WebApp {
       button.setAttribute('aria-selected', String(active));
     }
     this.navButtons.get(screen)?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+    // DeepSeek-style chrome: the chat screen owns its header/top bar, so the
+    // global brand bar and tab bar hide while a conversation is open.
+    const chatFocus = screen === SCREEN.CHAT;
+    if (this.topbar) this.topbar.hidden = chatFocus;
+    if (this.nav) this.nav.hidden = chatFocus;
+    if (this.appEl) {
+      setClass(this.appEl, 'app--chat', chatFocus);
+      setClass(this.appEl, 'app--pairing', screen === SCREEN.PAIRING);
+    }
 
     const common = { root: this.screenHost, controller: this.controller, toast: this.toast };
     try {
@@ -387,7 +465,7 @@ export class WebApp {
             ...common,
             overlay: this.recordingOverlay,
             onBack: () => this.show(SCREEN.SESSIONS),
-            onOpenSessions: () => this.show(SCREEN.SESSIONS),
+            onOpenSessions: () => this.openDrawer(),
           });
           break;
         case SCREEN.SETTINGS:
@@ -430,6 +508,10 @@ export class WebApp {
 
   /** Browser/Android back handling: sheets first, then up one screen. */
   handleBack() {
+    if (this.drawerRoot && !this.drawerRoot.hidden) {
+      this.closeDrawer();
+      return true;
+    }
     if (hasOpenSheet()) {
       closeTopSheet('back');
       return true;

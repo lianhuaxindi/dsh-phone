@@ -164,16 +164,38 @@ test('NativeTransport maps bridge events to transport events', () => {
   assert.deepEqual(events.errors.at(-1), { scope: 'audio', code: 5001, message: 'offline', retryable: true });
 });
 
-test('NativeTransport scanPairing resolves unsupported for M2 and on bridge event', async () => {
+test('NativeTransport scanPairing times out and resolves v1.1 results (D-030)', async () => {
   const { transport, scheduler, emitNative } = createNative();
   const result = transport.scanPairing();
-  scheduler.advanceBy(2500);
-  assert.equal((await result).supported, false);
+  scheduler.advanceBy(transport.scanTimeoutMs);
+  const timedOut = await result;
+  assert.equal(timedOut.ok, false);
+  assert.equal(timedOut.reason, 'timeout');
 
   const pending = transport.scanPairing();
-  emitNative({ type: 'scanPairing.result', supported: false, reason: 'm3' });
-  const settled = await pending;
-  assert.equal(settled.supported, false);
+  emitNative({
+    type: 'scanPairing.result',
+    ok: true,
+    uri: 'dsphone://pair?v=1&host=192.168.1.10&port=8765&fp=' + 'a'.repeat(64) + '&code=123456&sid=srv-1',
+    host: '192.168.1.10',
+    port: 8765,
+    fp: 'a'.repeat(64),
+    code: '123456',
+    sid: 'srv-1',
+    hosts: ['10.5.19.39'],
+    name: 'KQ-PC',
+  });
+  const scanned = await pending;
+  assert.equal(scanned.ok, true);
+  assert.equal(scanned.host, '192.168.1.10');
+  assert.deepEqual(scanned.hosts, ['10.5.19.39']);
+  assert.equal(scanned.name, 'KQ-PC');
+
+  const failed = transport.scanPairing();
+  emitNative({ type: 'scanPairing.result', ok: false, reason: 'permission_denied' });
+  const failure = await failed;
+  assert.equal(failure.ok, false);
+  assert.equal(failure.reason, 'permission_denied');
 });
 
 test('NativeTransport onBack chains to the app back handler', () => {
@@ -286,4 +308,70 @@ test('WsTransport handshake stores the debug token and sends hello', async () =>
   socket.onmessage({ data: JSON.stringify({ type: 'session.list.ok', seq: 5, replyTo: 99, sessions: [] }) });
   const lastMessage = socket.sent.at(-1);
   assert.ok(lastMessage);
+});
+
+test('NativeTransport pickImage settles image.picked / image.pickFailed (D-029)', async () => {
+  const { transport, posted, emitNative } = createNative();
+  const pending = transport.pickImage('camera');
+  assert.equal(posted.at(-1).op, 'pickImage');
+  assert.equal(posted.at(-1).source, 'camera');
+  emitNative({
+    type: 'image.picked',
+    data: 'aGVsbG8=',
+    mimeType: 'image/jpeg',
+    name: 'photo.jpg',
+    width: 1600,
+    height: 1200,
+  });
+  const picked = await pending;
+  assert.equal(picked.ok, true);
+  assert.equal(picked.mimeType, 'image/jpeg');
+  assert.equal(picked.width, 1600);
+
+  const failed = transport.pickImage('gallery');
+  emitNative({ type: 'image.pickFailed', reason: 'permission_denied' });
+  const failure = await failed;
+  assert.equal(failure.ok, false);
+  assert.equal(failure.reason, 'permission_denied');
+});
+
+test('NativeTransport mediaGet correlates _reqId → _reqTo (PROTOCOL §9 v1.1)', async () => {
+  const { transport, posted, emitNative, scheduler } = createNative();
+  const pending = transport.mediaGet('md-1');
+  const sent = posted.at(-1);
+  assert.equal(sent.op, 'send');
+  const json = JSON.parse(sent.json);
+  assert.equal(json.type, 'media.get');
+  assert.equal(json.mediaId, 'md-1');
+  assert.equal(typeof json._reqId, 'string');
+
+  emitNative({
+    type: 'proto.message',
+    message: {
+      type: 'media.data',
+      mediaId: 'md-1',
+      mimeType: 'image/png',
+      data: 'aGVsbG8=',
+      _reqTo: json._reqId,
+    },
+  });
+  const result = await pending;
+  assert.equal(result.ok, true);
+  assert.equal(result.media.mediaId, 'md-1');
+  assert.equal(result.media.mimeType, 'image/png');
+  scheduler.flush();
+});
+
+test('NativeTransport net.state error maps to FAILED with tried diagnostics (D-034)', () => {
+  const { transport, events, emitNative } = createNative();
+  emitNative({
+    type: 'net.state',
+    state: 'error',
+    reason: 'all_addresses_failed',
+    message: 'all addresses timed out',
+    tried: [{ host: '192.168.1.10', port: 8765, elapsedMs: 3000, error: 'timeout' }],
+  });
+  assert.equal(events.states.at(-1).state, TransportState.FAILED);
+  assert.equal(events.states.at(-1).detail.reason, 'all_addresses_failed');
+  assert.equal(events.states.at(-1).detail.tried.length, 1);
 });

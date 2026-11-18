@@ -83,7 +83,7 @@ relpath() { # $1 = base (absolute or normalised relative), $2 = file
 
 is_excluded() {
     case "$1" in
-        *.md | package.json | */package.json | tests/* | node_modules/* | */node_modules/*) return 0 ;;
+        *.md | *.tmp | package.json | */package.json | tests/* | node_modules/* | */node_modules/*) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -108,12 +108,14 @@ COUNT=0
 SKIPPED=0
 SKIPPED_MD=0
 SKIPPED_PKG=0
+SKIPPED_TMP=0
 while IFS= read -r file; do
     rel=$(relpath "$SRC" "$file")
     if is_excluded "$rel"; then
         SKIPPED=$((SKIPPED + 1))
         case "$rel" in *.md) SKIPPED_MD=$((SKIPPED_MD + 1)) ;; esac
         case "$rel" in package.json | */package.json) SKIPPED_PKG=$((SKIPPED_PKG + 1)) ;; esac
+        case "$rel" in *.tmp) SKIPPED_TMP=$((SKIPPED_TMP + 1)) ;; esac
         continue
     fi
     printf '%s\n' "$rel" >> "$REL_LIST"
@@ -158,7 +160,7 @@ if [ "$VERIFY_ONLY" -eq 1 ]; then
     fi
     log "source      : $SRC"
     log "destination : $DST"
-    log "excluded    : tests/, node_modules/, *.md, package.json (skipped $SKIPPED, *.md=$SKIPPED_MD, package.json=$SKIPPED_PKG)"
+    log "excluded    : tests/, node_modules/, *.md, package.json, *.tmp (skipped $SKIPPED, *.md=$SKIPPED_MD, package.json=$SKIPPED_PKG, *.tmp=$SKIPPED_TMP)"
     log "verify OK: target is up to date ($COUNT files): $DST"
     exit 0
 fi
@@ -167,12 +169,16 @@ fi
 mkdir -p "$DST"
 COPIED=0
 UNCHANGED=0
+VANISHED=0
 while IFS= read -r rel; do
     file="$SRC/$rel"
     target="$DST/$rel"
     mkdir -p "$(dirname -- "$target")"
     if [ -f "$target" ] && cmp -s "$file" "$target"; then
         UNCHANGED=$((UNCHANGED + 1))
+    elif [ ! -f "$file" ]; then
+        log "WARN: source vanished during sync, skipped: $rel"
+        VANISHED=$((VANISHED + 1))
     else
         cp -p "$file" "$target"
         COPIED=$((COPIED + 1))
@@ -200,6 +206,6 @@ fi
 log "source      : $SRC"
 log "destination : $DST"
 log "excluded    : tests/, node_modules/, *.md, package.json (skipped $SKIPPED, *.md=$SKIPPED_MD, package.json=$SKIPPED_PKG)"
-log "synced      : $COUNT files total (copied $COPIED, unchanged $UNCHANGED, removed $REMOVED)"
+log "synced      : $COUNT files total (copied $COPIED, unchanged $UNCHANGED, removed $REMOVED, vanished $VANISHED)"
 log "OK: $DST/index.html"
 exit 0

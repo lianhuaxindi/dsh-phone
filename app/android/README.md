@@ -21,7 +21,9 @@ into `app/src/main/assets/web/` before building.
 | minSdk | 29 (Android 10, DECISIONS D-006) |
 | Java/Kotlin target | 17 |
 
-Runtime dependency: `com.squareup.okhttp3:okhttp:4.12.0` only.
+Runtime dependencies: `com.squareup.okhttp3:okhttp:4.12.0` (WSS) and
+`com.google.zxing:core:3.5.3` (local QR decoding for `scanPairing`, D-030;
+~0.5 MB, no Play Services, no network).
 Unit-test dependency: `junit:junit:4.13.2`.
 
 ### Why OkHttp instead of `java.net.http`
@@ -46,7 +48,7 @@ repo carries a self-contained toolchain under `.tools/android/` (gitignored JDK 
 $t = '<repo>\.tools\android'
 $env:JAVA_HOME = "$t\jdk"; $env:ANDROID_HOME = "$t\sdk"; $env:ANDROID_SDK_ROOT = "$t\sdk"
 & "$t\gradle-8.9\bin\gradle.bat" -p app\android assembleDebug --no-daemon --console=plain `
-  -Pdsphone.versionName=1.0.0 -Pdsphone.versionCode=10000
+  -Pdsphone.versionName=1.1.0 -Pdsphone.versionCode=10100
 # → app\android\app\build\outputs\apk\debug\app-debug.apk
 ```
 
@@ -69,11 +71,11 @@ generates the wrapper first (it must not be committed back):
 cd app/android
 gradle wrapper --gradle-version 8.9 --distribution-type bin --no-daemon
 ./gradlew assembleDebug --no-daemon --console=plain --stacktrace \
-  -Pdsphone.versionName=1.0.0 -Pdsphone.versionCode=1
+  -Pdsphone.versionName=1.1.0 -Pdsphone.versionCode=10100
 ```
 
 The build reads `-Pdsphone.versionName` / `-Pdsphone.versionCode` from
-`app/build.gradle.kts`; defaults are `1.0.0` / `1`.
+`app/build.gradle.kts`; defaults are `1.1.0` / `10100` (D-033).
 
 A normal local build (with JDK 17 + Android SDK + `local.properties` containing
 `sdk.dir=...`) is:
@@ -104,35 +106,83 @@ explicit MIME types: `.js` → `text/javascript`, `.json` → `application/json`
 `.css` → `text/css`. If the assets are missing the app shows a localized
 fallback page instead of a blank screen.
 
+### v1.1 additions (D-029 / D-030 / D-031 / D-033)
+
+- **QR scanning (`scanPairing`).** `ScanActivity` uses Camera2 + ZXing core
+  (`BarcodeFormat.QR_CODE`, `MultiFormatReader`) to decode locally — no Play
+  Services, no network. `CAMERA` is a runtime permission and the manifest
+  declares `uses-feature android.hardware.camera required="false"`, so
+  camera-less devices still install and fall back to manual pairing. Success →
+  `{"type":"scanPairing.result","ok":true,"uri":...,"host":...,"port":...,"fp":...,"code":...,"sid":...,"hosts":[...],"name":...}`;
+  failure → `{"ok":false,"reason":"cancelled|permission_denied|no_camera|decode_failed"}`.
+- **Image pick (`pickImage`).** `{"op":"pickImage","source":"camera"|"gallery"}`.
+  Gallery = `ACTION_GET_CONTENT` (`image/*`, `CATEGORY_OPENABLE`); camera =
+  `ACTION_IMAGE_CAPTURE` with `EXTRA_OUTPUT` pointing at a private
+  `content://com.dsh.phone.fileprovider/cache/images/...` URI (custom
+  `ImageFileProvider`; zero AndroidX). `media/ImagePicker` decodes twice
+  (`inJustDecodeBounds` → `inSampleSize` → exact `ImageScaler` scale), caps the
+  long edge at **1600 px**, re-encodes **JPEG q80** (`Base64.NO_WRAP`, quality
+  ladder to stay ≤2 MiB) and answers
+  `image.picked{data,mimeType,name,width,height}` or
+  `image.pickFailed{reason}` (`permission_denied|cancelled|failed|decode_failed|too_large`).
+  `<input type=file>` from the Web UI is served by `onShowFileChooser`.
+- **Multi-address connect (D-031).** The pairing URI may carry `hosts=`
+  (comma-separated candidates, same port) and `name=`. Android tries `host`,
+  then each `hosts` entry with a **3 s timeout per address**
+  (`AddressCandidates` + `WssClient` candidate cycle), keeps the first success,
+  and persists the winner as `last_host` / `known_hosts` (preferred on
+  auto-connect). When every address fails native emits
+  `net.state{"state":"error","reason":"all_addresses_failed","message":...,
+  "tried":[{"host","port","elapsedMs","error"}]}` **plus**
+  `error{scope:"connect",code:5001,retryable:true}`. D-034 freezes the
+  `net.state` wire enum as `idle|connecting|online|closed|error`; the extra
+  fields are additive, so the Web UI renders the disconnected state and can
+  still show which addresses were attempted.
+- **v1.1 protocol fields** (`chat.send.images`, `session.meta`,
+  `assistant.done.usage`, `media.get` / `media.data`) flow through
+  `proto.message` untouched; image payloads are built by the Web UI and only
+  travel inside `chat.send.images` (base64 never touches the bridge directly).
+  Subprotocol stays `dsphone.v1`.
+- **Version defaults:** `versionName 1.1.0`, `versionCode 10100` (D-033);
+  `-Pdsphone.versionName/Code` still override.
+
 ## Source map
 
 ```
 app/src/main/java/com/dsh/phone/
 ├── DshApp.kt                 Application: AppCore.init + boot log
-├── MainActivity.kt           WebView shell, appassets.local handler, permissions
+├── MainActivity.kt           WebView shell, appassets.local handler, permissions, AppCore.Host
+├── ScanActivity.kt           Camera2 + ZXing QR scanner for scanPairing (D-030)
 ├── AppCore.kt                wiring: stores, WssClient, AudioSession, event sink
 ├── bridge/DshBridge.kt       @JavascriptInterface `window.DshNative.post(json)`
 ├── net/
-│   ├── WssClient.kt          OkHttp WSS, cert pinning, handshake, seq, reconnect
+│   ├── WssClient.kt          OkHttp WSS, cert pinning, handshake, seq, reconnect, multi-address
+│   ├── AddressCandidates.kt  host → hosts[] order, 3 s per-address timeout (D-031)
 │   ├── BackoffPolicy.kt      PROTOCOL §7 backoff (1/2/4/8/15 s ±20%)
 │   └── ClosePolicy.kt        close-code → reconnect / re-pair / fatal
 ├── protocol/
 │   ├── Protocol.kt           frozen v1 JSON builders + HMAC (no Android deps)
-│   ├── Pairing.kt            `dsphone://pair` URI parsing/validation
+│   ├── Pairing.kt            `dsphone://pair` URI parsing/validation incl. hosts/name
 │   └── AudioFrame.kt         7-byte header + 640-byte PCM16LE frames
 ├── audio/
 │   ├── AudioRecorder.kt      AudioRecord VOICE_COMMUNICATION 16k/16-bit/mono
 │   ├── BtRouter.kt           setCommunicationDevice (31+) / SCO (29-30)
 │   └── AudioSession.kt       PTT lifecycle, pre-roll buffer, route + 120 s cap
+├── media/
+│   ├── ImageScaler.kt        ≤1600 px long edge + JPEG q80 constants (pure Kotlin)
+│   └── ImagePicker.kt        decode/scale/JPEG/base64 pipeline for pickImage (D-029)
 ├── service/MicService.kt     foreground service (type microphone)
-├── storage/                  TokenStore (Keystore AES/GCM), SettingsStore
+├── storage/                  TokenStore (Keystore AES/GCM), SettingsStore,
+│                             ImageFileProvider (camera output ContentProvider)
 ├── log/                      LogStore (7-day JSONL), Redactor
 └── util/                     Json / JsonObj (pure Kotlin), Hex
 ```
 
 `app/src/test/java/com/dsh/phone/` contains JVM unit tests for the pure logic:
 `AudioFrameTest`, `AuthTest` (PROTOCOL §6.3 vector), `BackoffTest`,
-`PairingTest`, `ClosePolicyTest`, `JsonTest`, `RedactorTest`, `ProtocolTest`.
+`PairingTest` (incl. v1.1 hosts/name), `AddressCandidatesTest`,
+`ImageScalerTest`, `ClosePolicyTest`, `JsonTest`, `RedactorTest`,
+`ProtocolTest` — 10 classes / 71 tests.
 
 `tools/verify_protocol.py` re-implements the same pure protocol rules in Python
 and checks the frozen vectors without any Android toolchain
@@ -153,10 +203,11 @@ and checks the frozen vectors without any Android toolchain
 - **Reconnect.** Native reconnects on its own (backoff + heartbeat watchdog 45 s
   client-side / server 60 s). The `reconnect` op forces an immediate attempt.
   `restartBridge` does not exist: a phone cannot restart the desktop Bridge.
-- **Scanning.** M2 accepts manual host/port/fingerprint/code entry; the
-  `scanPairing` op currently returns
-  `{"type":"scanPairing.result","supported":false,"reason":"m3"}`. M3 will use
-  embedded ZXing (D-011; no JS QR decoder).
+- **Scanning.** v1.1 implements `scanPairing` for real: `ScanActivity`
+  (Camera2 + ZXing core) decodes a QR locally and the native side parses the
+  `dsphone://pair` URI (fingerprint/code validated) before emitting
+  `scanPairing.result`. Manual host/port/fp/code entry remains as fallback
+  (D-030). The old `{"supported":false,"reason":"m3"}` stub is gone.
 - **Audio.** 16 kHz / 16-bit / mono, 20 ms = 640 B, header
   `[0x01][aseq u16LE][tsMs u32LE]`, `aseq` from 1 wrapping 65535→1, no binary
   frames before `audio.ready` (frames captured while the route is warming up are
@@ -178,11 +229,14 @@ and checks the frozen vectors without any Android toolchain
 
 ## Not verified on a device (runtime risk)
 
-The module now **compiles and packages locally** (D-027): `assembleDebug` succeeded
-(54s), `app-debug.apk` is 3,867,632 B (`com.dsh.phone` 1.0.0/10000, minSdk 29 /
-targetSdk 35), and all 8 JVM test classes / 53 tests pass (see BUILD-LOCAL.md §7
-for the two ways to run them when the sandbox blocks Gradle's forked test worker).
-What is still unverified is **device behaviour** — nothing below has run on real
+The module **compiles and packages locally** (D-027): the **final v1.1 APK**
+(includes the web-ui v1.1 assets synced by `scripts/sync_web.ps1`) was built
+with `assembleDebug` after a 27 s incremental rebuild, `app-debug.apk` is
+**4,578,710 B** (`com.dsh.phone` **1.1.0 / 10100**, minSdk 29 / targetSdk 35;
+SHA-256 `A45C164E55331ACF03697D7106DEC6C60DD37361AEE0E4C263DB14E726704601`), and
+all **10 JVM test classes / 71 tests** pass (see BUILD-LOCAL.md §7 for the two
+ways to run them when the sandbox blocks Gradle's forked test worker). What is
+still unverified is **device behaviour** — nothing below has run on real
 hardware yet, and no `adb` exists on this workstation.
 
 Highest-risk items, in order:
@@ -191,13 +245,21 @@ Highest-risk items, in order:
    resolution) — first fix should be expected in CI.
 2. OkHttp + custom `TrustManager` pinning path and `Sec-WebSocket-Protocol`
    negotiation against the Python Bridge.
-3. `AudioRecord`/`VOICE_COMMUNICATION` behaviour and AEC availability per device.
-4. `setCommunicationDevice` / SCO route switching incl. 8 s timeout and
+3. **Camera2 + ZXing scan path (new in v1.1):** preview/`ImageReader` formats on
+   different OEM cameras, QR decode latency and battery, camera permission
+   denial flow, `ScanActivity` lifecycle (rotation/background).
+4. **Image picking (new in v1.1):** `ACTION_IMAGE_CAPTURE` `EXTRA_OUTPUT` grants
+   on OEM ROMs, custom `ImageFileProvider` behaviour, EXIF rotation of camera
+   photos, 2 MiB/6 MiB limits on real photos, `onShowFileChooser` from the Web UI.
+5. **Multi-address connect (new in v1.1):** 3 s per-address timeout on slow Wi-Fi,
+   `last_host` persistence, failure diagnostics JSON shape consumed by the Web UI.
+6. `AudioRecord`/`VOICE_COMMUNICATION` behaviour and AEC availability per device.
+7. `setCommunicationDevice` / SCO route switching incl. 8 s timeout and
    restoring the phone route without breaking music.
-5. Foreground-service restrictions on OEM ROMs.
-6. AndroidKeyStore AES/GCM (StrongBox-backed keys not required; fallback keystore
+8. Foreground-service restrictions on OEM ROMs.
+9. AndroidKeyStore AES/GCM (StrongBox-backed keys not required; fallback keystore
    may need the device to be unlocked after reboot).
-7. WebView virtual-origin handling (relative module imports, IndexedDB).
+10. WebView virtual-origin handling (relative module imports, IndexedDB).
 
 ## Known OEM differences
 
@@ -277,7 +339,7 @@ log evidence match; "it seemed to work" is not acceptance.
 | `audio.ready` | `WssClient.kt:702-713` | `asrMode`, `lang`, `codecs` from the server |
 | `audio.error` | `AudioSession.kt:343-352` (local), `WssClient.kt:715-723/984-994` (server) | local codes are strings: `offline`, `permission_denied`, `audio_busy`, `recorder_failed`, `route_failed`, `max_duration`, `connection_lost`; server codes are numbers (`2001` busy, `2002` ASR unavailable) |
 | `audio.stopped` | `AudioSession.kt:221/242` | `aseq` of the last frame sent |
-| `net.state` | `WssClient.kt:965-970` | `idle` / `connecting` / `pairing` / `authenticating` / `online` / `reconnecting` / `failed` / `closed` |
+| `net.state` | `WssClient.kt` (setState) | `idle` / `connecting` / `pairing` / `authenticating` / `online` / `reconnecting` / `error` / `closed` (D-034: failures use `error`; on a multi-address failure the event also carries `reason`/`message`/`tried`) |
 | `error` | `WssClient.kt:972-982` | `scope` + numeric protocol code (tls/protocol/transport/connect/pair) |
 
 Relevant `DshPhone` log lines: `app.start`, `ws.connect`, `ws.reconnect_scheduled`,

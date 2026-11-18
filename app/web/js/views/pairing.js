@@ -23,6 +23,7 @@ export class PairingView {
     this.toast = toast;
     this.onPaired = onPaired;
     this.unsubscribers = [];
+    this.scannedHosts = [];
     this._build();
   }
 
@@ -72,6 +73,8 @@ export class PairingView {
       t('pairing.scan'),
     );
     this.scanHint = h('p', { class: 'pairing__hint' }, t('pairing.scanHint'));
+    this.scanResult = h('div', { class: 'pairing__scan-result', role: 'status' });
+    setHidden(this.scanResult, true);
 
     this.form = h(
       'form',
@@ -91,6 +94,7 @@ export class PairingView {
       this.liveError,
       h('div', { class: 'pairing__actions' }, this.connectButton, this.scanButton),
       this.scanHint,
+      this.scanResult,
     );
 
     this.savedHint = h('p', { class: 'pairing__saved' }, t('pairing.savedHint'));
@@ -161,6 +165,7 @@ export class PairingView {
       fp: this.fp.input.value.trim(),
       code: this.code.input.value.trim(),
       deviceName: this.deviceName.input.value.trim() || undefined,
+      hosts: Array.isArray(this.scannedHosts) ? this.scannedHosts : undefined,
     });
     if (!result?.ok) {
       this.connectButton.disabled = false;
@@ -171,19 +176,88 @@ export class PairingView {
   }
 
   async _scan() {
-    const result = await this.controller.scanPairing();
-    if (!result?.supported) {
-      this.scanHint.textContent = t('pairing.scanHint');
-      this.toast?.showText(t('pairing.scanHint'));
+    this.scanButton.disabled = true;
+    try {
+      const result = await this.controller.scanPairing();
+      this._applyScanResult(result);
+    } finally {
+      this.scanButton.disabled = false;
     }
+  }
+
+  /** Handle the v1.1 `scanPairing.result` shapes (D-030). */
+  _applyScanResult(result) {
+    if (!result || typeof result !== 'object') return;
+    const isLegacyUnsupported = result.ok === undefined && result.supported === false;
+    const reason = result.reason ?? (isLegacyUnsupported ? 'unsupported' : 'decode_failed');
+    const cleanReason = reason === 'm3' ? 'unsupported' : String(reason);
+    if (result.ok === true && result.host) {
+      // Fill the manual form so the user can review before connecting.
+      this.host.input.value = String(result.host);
+      if (result.port !== undefined && result.port !== null) this.port.input.value = String(result.port);
+      if (result.fp) this.fp.input.value = String(result.fp);
+      if (result.code) this.code.input.value = String(result.code);
+      this.scannedHosts = Array.isArray(result.hosts)
+        ? result.hosts.map((item) => String(item ?? '').trim()).filter(Boolean)
+        : [];
+      this._validateLive();
+      const hosts = this.scannedHosts.length > 0 ? this.scannedHosts.join(', ') : '';
+      const parts = [t('pairing.scanSuccess')];
+      if (result.name) parts.push(t('pairing.scannedName', { name: result.name }));
+      if (hosts) parts.push(t('pairing.hostsHint', { hosts }));
+      this.scanResult.textContent = parts.join(' · ');
+      setHidden(this.scanResult, false);
+      this.scanHint.textContent = t('pairing.scanHint');
+      this.toast?.show({ key: 'pairing.scanSuccess' });
+      return;
+    }
+    const reasonKey = `scan.reason.${cleanReason}`;
+    const reasonText = t(reasonKey) === reasonKey ? t('scan.reason.decode_failed') : t(reasonKey);
+    const message = cleanReason === 'unsupported'
+      ? t('pairing.scanUnsupported')
+      : t('pairing.scanFailed', { reason: reasonText });
+    this.scanResult.textContent = message;
+    setHidden(this.scanResult, false);
+    this.scanHint.textContent = t('pairing.scanHint');
+    this.toast?.showText(message);
   }
 
   mount() {
     this.unsubscribers.push(
       this.controller.on('pair-error', (payload) => this._showError(payload)),
+      this.controller.on('error', (payload) => this._showConnectDiagnostics(payload)),
       this.controller.on('state', (snapshot) => this.render(snapshot)),
       this.controller.on('toast', (payload) => this.toast?.show(payload)),
     );
+  }
+
+  /**
+   * D-031/D-034: when every address fails the native bridge reports
+   * `net.state{state:"error",reason:"all_addresses_failed",tried:[...]}`.
+   * Show which addresses were tried so the user can fix Wi-Fi/AP isolation.
+   */
+  _showConnectDiagnostics(payload) {
+    if (!payload || payload.scope !== 'connect') return;
+    const copy = errorCopy(payload.code ?? 5001);
+    setHidden(this.error, false);
+    this.errorTitle.textContent = copy.title;
+    const tried = Array.isArray(payload.tried) ? payload.tried : [];
+    const lines = [copy.next];
+    if (tried.length > 0) {
+      lines.push(t('pairing.triedTitle'));
+      for (const item of tried) {
+        lines.push(
+          t('pairing.triedItem', {
+            host: item?.host ?? '?',
+            port: item?.port ?? '?',
+            ms: item?.elapsedMs ?? '?',
+            error: item?.error ?? 'timeout',
+          }),
+        );
+      }
+    }
+    this.errorNext.textContent = lines.join(' · ');
+    this.connectButton.disabled = false;
   }
 
   _showError({ code, message, attemptsLeft }) {

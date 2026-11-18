@@ -206,6 +206,12 @@ def check_toolchain() -> None:
     # Dependencies pinned by the architecture decision.
     expect("com.squareup.okhttp3:okhttp:4.12.0" in app_text, "OkHttp 4.12.0 dependency present", "okhttp 4.12.0 dependency missing")
     expect("junit:junit:4.13.2" in app_text, "JUnit 4.13.2 test dependency present", "junit test dependency missing")
+    # v1.1 (D-030): ZXing core is the local QR decoder; no GMS / no network.
+    expect(
+        "com.google.zxing:core:3.5.3" in app_text,
+        "ZXing core 3.5.3 dependency present (D-030)",
+        "app build.gradle.kts: zxing core 3.5.3 dependency missing (D-030)",
+    )
     if "testOptions" not in app_text or "unitTests.isIncludeAndroidResources" not in app_text:
         warn("app build.gradle.kts: testOptions.unitTests.isIncludeAndroidResources not configured")
 
@@ -306,6 +312,17 @@ def check_build_flags(app_text: str) -> None:
     expect("buildConfig = true" in app_text, "buildFeatures.buildConfig enabled (BuildConfig.VERSION_NAME)", "buildFeatures.buildConfig must be true")
     expect('val dsphoneVersionName' in app_text and 'findProperty("dsphone.versionName")' in app_text, "CI version injection: versionName", "app build.gradle.kts does not read -Pdsphone.versionName")
     expect('val dsphoneVersionCode' in app_text and 'findProperty("dsphone.versionCode")' in app_text, "CI version injection: versionCode", "app build.gradle.kts does not read -Pdsphone.versionCode")
+    # v1.1 defaults (D-033): still overridable from CI with -Pdsphone.versionName/Code.
+    expect(
+        re.search(r'findProperty\("dsphone\.versionName"\).*?: "1\.1\.0"', app_text) is not None,
+        'v1.1 default versionName "1.1.0" (D-033)',
+        'app build.gradle.kts: default versionName is not "1.1.0" (D-033)',
+    )
+    expect(
+        re.search(r'findProperty\("dsphone\.versionCode"\).*?: "10100"', app_text) is not None,
+        'v1.1 default versionCode "10100" (D-033)',
+        'app build.gradle.kts: default versionCode is not "10100" (D-033)',
+    )
 
 
 # ------------------------------------------------------------- 7 repo hygiene

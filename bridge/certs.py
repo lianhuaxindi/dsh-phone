@@ -189,10 +189,15 @@ def pair_uri(
     code: str,
     server_id: str,
     version: int = 1,
+    hosts: list[str] | None = None,
+    name: str | None = None,
 ) -> str:
     """构造配对二维码 URI（PROTOCOL §5.1）。
 
-    例：``dsphone://pair?v=1&host=192.168.1.10&port=8765&fp=<64hex>&code=123456&sid=srv-1a2b``
+    v1.1 增量（D-031）：``hosts`` 为逗号分隔的候选地址（同 port），
+    ``name`` 为电脑显示名。
+
+    例：``dsphone://pair?v=1&host=192.168.1.10&port=8765&fp=<64hex>&code=123456&sid=srv-1a2b&hosts=192.168.1.10,10.5.19.39&name=KQ-PC``
 
     ``host`` 必须是具体监听地址（调用方应已拒绝 0.0.0.0/::）。
     """
@@ -202,7 +207,7 @@ def pair_uri(
     if not host or host.strip("[]") in {"0.0.0.0", "::", "*"}:
         raise ValueError(f"配对 URI 不接受通配监听地址: {host!r}")
     host_param = quote(host.strip("[]"), safe="")
-    return (
+    uri = (
         f"dsphone://pair?v={version}"
         f"&host={host_param}"
         f"&port={int(port)}"
@@ -210,6 +215,12 @@ def pair_uri(
         f"&code={code}"
         f"&sid={quote(server_id, safe='')}"
     )
+    candidates = [value.strip() for value in (hosts or []) if value and value.strip()]
+    if candidates:
+        uri += f"&hosts={quote(','.join(candidates), safe='')}"
+    if name and name.strip():
+        uri += f"&name={quote(name.strip(), safe='')}"
+    return uri
 
 
 def server_ssl_context(

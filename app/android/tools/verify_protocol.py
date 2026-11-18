@@ -226,6 +226,87 @@ def pairing_checks() -> None:
     )
     check_true("host must not be 0.0.0.0", query["host"][0] != "0.0.0.0")
 
+    # --- v1.1 (D-031): optional hosts=/name= on the pairing URI ---------------
+    uri_v11 = uri + "&hosts=192.168.1.10,10.5.19.39&name=KQ-PC"
+    parsed_v11 = urlparse(uri_v11)
+    check("pair v1.1 target", parsed_v11.netloc, "pair")
+    query_v11 = parse_qs(parsed_v11.query)
+    check("pair v1.1 hosts raw", query_v11["hosts"][0], "192.168.1.10,10.5.19.39")
+    check("pair v1.1 name", query_v11["name"][0], "KQ-PC")
+    host_candidates = [h.strip() for h in query_v11["hosts"][0].split(",") if h.strip()]
+    check("pair v1.1 candidate count", len(host_candidates), 2)
+    check_true("pair v1.1 candidates share the port", all(":" not in h for h in host_candidates))
+    check_true(
+        "pair v1.1 primary host attempted first",
+        query_v11["host"][0] == host_candidates[0],
+    )
+    check_true(
+        "pair v1.1 fallback order",
+        [h for h in host_candidates if h != query_v11["host"][0]] == ["10.5.19.39"],
+    )
+
+
+# ---------------------------------------------------------------- PROTOCOL §9
+def v11_media_checks() -> None:
+    """v1.1 media/session.meta/usage shapes (D-029, PROTOCOL §9)."""
+    image = {
+        "mimeType": "image/jpeg",
+        "data": "<base64>",
+        "name": "photo.jpg",
+        "width": 1200,
+        "height": 800,
+    }
+    chat_send = {
+        "type": "chat.send",
+        "seq": 10,
+        "clientId": "c-1",
+        "sessionId": "s-1",
+        "text": "hi",
+        "images": [image],
+    }
+    check_true("chat.send.images is an array", isinstance(chat_send.get("images"), list))
+    for key in ("mimeType", "data", "name", "width", "height"):
+        check(f"chat.send image field `{key}`", key in image, True)
+    check("max images per message", 4, 4)
+    check("max decoded image bytes", 2 * 1024 * 1024, 2_097_152)
+    check("max total image bytes", 6 * 1024 * 1024, 6_291_456)
+    check_true("image long edge <= 1600", max(image["width"], image["height"]) <= 1600)
+    check_true("image is re-encoded as JPEG", image["mimeType"] == "image/jpeg")
+
+    meta = {
+        "type": "session.meta",
+        "seq": 12,
+        "sessionId": "s-1",
+        "provider": "dsh",
+        "model": "deepseek",
+        "reasoningEffort": "medium",
+        "contextWindow": 128000,
+    }
+    for key in ("sessionId", "provider", "model", "reasoningEffort", "contextWindow"):
+        check(f"session.meta field `{key}`", key in meta, True)
+
+    usage = {
+        "inputTokens": 10,
+        "outputTokens": 20,
+        "totalTokens": 30,
+        "contextWindow": 128000,
+        "usedTokens": 30,
+    }
+    check("usage usedTokens falls back to totalTokens", usage["usedTokens"], usage["totalTokens"])
+    check_true("optional usage keys may be omitted", "cacheReadTokens" not in usage)
+
+    media_get = {"type": "media.get", "seq": 31, "mediaId": "abc123"}
+    check("media.get field `mediaId`", "mediaId" in media_get, True)
+    media_data = {
+        "type": "media.data",
+        "seq": 32,
+        "replyTo": 31,
+        "mimeType": "image/jpeg",
+        "data": "<base64>",
+    }
+    check("media.data fields", ("mimeType" in media_data and "data" in media_data), True)
+    check("media.data replies to media.get", media_data["replyTo"], media_get["seq"])
+
 
 # --------------------------------------------------------------- JsBridge event
 def js_bridge_events() -> None:
@@ -239,11 +320,36 @@ def js_bridge_events() -> None:
         "audio.level": {"level": 0.42},
         "audio.stopped": {"aseq": 200},
         "logs.exported": {"text": "{\"event\":\"app.start\"}", "truncated": False},
-        "scanPairing.result": {"supported": False, "reason": "m3"},
+        "scanPairing.result": {
+            "ok": True,
+            "uri": "dsphone://pair?v=1&host=192.168.1.10&port=8765&fp=<64hex>",
+            "host": "192.168.1.10",
+            "port": 8765,
+            "fp": "<64hex>",
+            "hosts": ["10.5.19.39"],
+            "name": "KQ-PC",
+        },
+        "image.picked": {
+            "data": "<base64>",
+            "mimeType": "image/jpeg",
+            "name": "photo.jpg",
+            "width": 1200,
+            "height": 800,
+        },
+        "image.pickFailed": {"reason": "cancelled"},
     }
     for name, payload in events.items():
         raw = json.dumps({"type": name, **payload}, separators=(",", ":"))
         check(f"event {name} json", json.loads(raw)["type"], name)
+
+    # v1.1 failure variant (D-030): the same event carries ok=false + reason.
+    failed = json.dumps(
+        {"type": "scanPairing.result", "ok": False, "reason": "permission_denied"},
+        separators=(",", ":"),
+    )
+    parsed_failed = json.loads(failed)
+    check("scanPairing.result failure ok", parsed_failed["ok"], False)
+    check("scanPairing.result failure reason", parsed_failed["reason"], "permission_denied")
 
 
 def main() -> int:
@@ -254,6 +360,7 @@ def main() -> int:
     close_policy_checks()
     json_builders()
     pairing_checks()
+    v11_media_checks()
     js_bridge_events()
 
     if FAILURES:

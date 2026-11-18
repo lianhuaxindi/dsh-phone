@@ -1,8 +1,10 @@
 ﻿<#
 .SYNOPSIS
   本地跑 CI 能跑的部分：CI 配置自检 + bridge pytest + web node --test + sync_web 一致性检查
-  + Android 4 个纯 stdlib 离线自检（app/android/tools/*.py）。
-  Android 构建本机不可用（DECISIONS D-006：无 JDK/Android SDK），只在 CI 跑，见 ci/README.md。
+  + Android 4 个纯 stdlib 离线自检（app/android/tools/*.py）
+  + 端到端模拟（scripts/e2e_phone_sim.py --asr fake，默认 SKIP，加 -WithE2E 才跑）。
+  本机自建 Android 工具链出 APK 的路径见 DECISIONS D-027 与 app/android/BUILD-LOCAL.md；
+  GitHub Actions 恢复（D-026 billing lock 解除）前的本地替代流程见 ci/README.md。
 
 .DESCRIPTION
   一次运行全部检查，最后给出汇总与退出码：
@@ -13,13 +15,17 @@
   模块未就绪（其他 teammate 尚未产出文件）时默认算失败；加 -AllowMissing 则降级为 SKIP，
   可以先跑已就绪的部分。
 
+  每个步骤都会打印 PASS/FAIL/SKIP 与耗时；只有 FAIL 会改变退出码（有 FAIL 时 exit 1）。
+
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File ci\run_tests.ps1
   powershell -NoProfile -ExecutionPolicy Bypass -File ci\run_tests.ps1 -AllowMissing
+  powershell -NoProfile -ExecutionPolicy Bypass -File ci\run_tests.ps1 -AllowMissing -WithE2E
 #>
 [CmdletBinding()]
 param(
-    [switch]$AllowMissing
+    [switch]$AllowMissing,
+    [switch]$WithE2E
 )
 
 Set-StrictMode -Version 2.0
@@ -31,19 +37,28 @@ $RepoRoot = Split-Path -Parent $ScriptRoot
 $script:Failures = @()
 $script:Skips = @()
 
+$script:StepStart = $null
+
+function Format-Elapsed {
+    if ($null -eq $script:StepStart) { return 'n/a' }
+    $elapsed = (Get-Date) - $script:StepStart
+    if ($elapsed.TotalSeconds -ge 60) { return ('{0:N1} min' -f $elapsed.TotalMinutes) }
+    return ('{0:N1}s' -f $elapsed.TotalSeconds)
+}
 function Write-Step([string]$Message) {
     Write-Host ""
     Write-Host "=== $Message ===" -ForegroundColor Cyan
+    $script:StepStart = Get-Date
 }
 function Write-Pass([string]$Message) {
-    Write-Host "[run-tests][PASS] $Message" -ForegroundColor Green
+    Write-Host "[run-tests][PASS] $Message（耗时 $(Format-Elapsed)）" -ForegroundColor Green
 }
 function Write-Fail([string]$Message) {
-    Write-Host "[run-tests][FAIL] $Message" -ForegroundColor Red
+    Write-Host "[run-tests][FAIL] $Message（耗时 $(Format-Elapsed)）" -ForegroundColor Red
     $script:Failures += $Message
 }
 function Write-Skip([string]$Message) {
-    Write-Host "[run-tests][SKIP] $Message" -ForegroundColor Yellow
+    Write-Host "[run-tests][SKIP] $Message（耗时 $(Format-Elapsed)）" -ForegroundColor Yellow
     $script:Skips += $Message
 }
 
@@ -72,7 +87,7 @@ function Resolve-NodeExecutable {
 }
 
 Write-Host "[run-tests] 仓库: $RepoRoot"
-Write-Host "[run-tests] 模式: AllowMissing=$AllowMissing（模块未就绪时是否降级为 SKIP）"
+Write-Host "[run-tests] 模式: AllowMissing=$AllowMissing（模块未就绪时是否降级为 SKIP），WithE2E=$WithE2E（是否跑端到端模拟）"
 
 $Python = Resolve-PythonExecutable
 if (-not $Python) {
@@ -86,7 +101,7 @@ if ($Node) { Write-Host "[run-tests] Node:   $Node" } else { Write-Host "[run-te
 # ---------------------------------------------------------------------------
 # 1/5 CI 配置自检（.github/workflows/ci.yml + ci/version.json + .gitignore）
 # ---------------------------------------------------------------------------
-Write-Step "1/5 CI 配置自检（ci/check_workflow.py）"
+Write-Step "1/6 CI 配置自检（ci/check_workflow.py）"
 $checkWorkflow = Join-Path $ScriptRoot 'check_workflow.py'
 if (-not (Test-Path -LiteralPath $checkWorkflow)) {
     Write-Fail "缺少 ci/check_workflow.py"
@@ -108,7 +123,7 @@ else {
 # ---------------------------------------------------------------------------
 # 2/5 bridge 测试（pytest bridge/tests，对应 CI bridge-tests job）
 # ---------------------------------------------------------------------------
-Write-Step "2/5 bridge 测试（pytest bridge/tests）"
+Write-Step "2/6 bridge 测试（pytest bridge/tests）"
 $bridgeRequirements = Join-Path $RepoRoot 'bridge\requirements.txt'
 $bridgeTestsDir = Join-Path $RepoRoot 'bridge\tests'
 if (-not (Test-Path -LiteralPath $bridgeRequirements) -or -not (Test-Path -LiteralPath $bridgeTestsDir)) {
@@ -138,7 +153,7 @@ else {
 # ---------------------------------------------------------------------------
 # 3/5 web 测试（node --test app/web/tests，对应 CI web-tests job）
 # ---------------------------------------------------------------------------
-Write-Step "3/5 web 测试（node --test app/web/tests）"
+Write-Step "3/6 web 测试（node --test app/web/tests）"
 $webIndex = Join-Path $RepoRoot 'app\web\index.html'
 $webTestsDir = Join-Path $RepoRoot 'app\web\tests'
 if (-not (Test-Path -LiteralPath $webIndex) -or -not (Test-Path -LiteralPath $webTestsDir)) {
@@ -219,7 +234,7 @@ else {
 # ---------------------------------------------------------------------------
 # 4/5 sync_web 一致性（CI 在 assembleDebug 前执行 bash scripts/sync_web.sh）
 # ---------------------------------------------------------------------------
-Write-Step "4/5 sync_web 一致性（app/web -> app/android/app/src/main/assets/web）"
+Write-Step "4/6 sync_web 一致性（app/web -> app/android/app/src/main/assets/web）"
 $syncScript = Join-Path $RepoRoot 'scripts\sync_web.ps1'
 $androidDir = Join-Path $RepoRoot 'app\android'
 if (-not (Test-Path -LiteralPath $syncScript)) {
@@ -240,7 +255,7 @@ else {
 # ---------------------------------------------------------------------------
 # 5/5 Android：先跑与 CI 相同的 4 个纯 stdlib 离线自检，再说明 APK 本机不可构建
 # ---------------------------------------------------------------------------
-Write-Step "5/5-1 Android 离线静态自检（与 CI android-build 前置步骤一致）"
+Write-Step "5/6-1 Android 离线静态自检（与 CI android-build 前置步骤一致）"
 $androidToolsDir = Join-Path $RepoRoot 'app\android\tools'
 $androidToolScripts = @('verify_protocol.py', 'check_contract.py', 'check_kotlin_static.py', 'check_gradle_config.py')
 if (-not (Test-Path -LiteralPath $androidToolsDir)) {
@@ -268,17 +283,78 @@ else {
     if ($toolFailures -eq 0) { Write-Pass "Android 离线静态自检通过（4 个脚本）" }
 }
 
-Write-Step "5/5-2 Android APK 构建"
+Write-Step "5/6-2 Android APK 构建（说明）"
 $java = Get-Command java -ErrorAction SilentlyContinue
 $androidSdk = $env:ANDROID_HOME
 if (-not $androidSdk) { $androidSdk = $env:ANDROID_SDK_ROOT }
+$localToolchain = Join-Path $RepoRoot '.tools\android'
 if (-not $java -or -not $androidSdk) {
-    Write-Skip "本机无 JDK/Android SDK（DECISIONS D-006）：Android 构建只在 CI 跑。手动出包：GitHub Actions -> Run workflow，产物见 run 的 Artifacts（app-debug-*）"
+    if (Test-Path -LiteralPath $localToolchain) {
+        Write-Skip "当前 shell 未设置 JDK/ANDROID_HOME，但检测到自建工具链 .tools/android（DECISIONS D-027）：按 app/android/BUILD-LOCAL.md 设置环境变量后运行 ci\build_apk.ps1 出包；GitHub Actions 解锁（D-026）前这是唯一出包路径"
+    }
+    else {
+        Write-Skip "本机无 JDK/Android SDK（DECISIONS D-006/D-027）：先按 app/android/BUILD-LOCAL.md 自建工具链出包，或等 GitHub Actions 解锁（D-026）后 Run workflow（产物 app-debug-*）"
+    }
 }
 else {
     Write-Host "[run-tests] 检测到 java=$($java.Source) ANDROID_HOME=$androidSdk"
     Write-Host "[run-tests] 本机具备 Android 工具链，可运行: powershell -NoProfile -ExecutionPolicy Bypass -File ci\build_apk.ps1"
     Write-Skip "run_tests.ps1 不自动构建 APK（耗时且会写 app/android/build/），请用 ci\build_apk.ps1"
+}
+
+# ---------------------------------------------------------------------------
+# 6/6 端到端模拟（scripts/e2e_phone_sim.py --asr fake；默认 SKIP，-WithE2E 才跑）
+# ---------------------------------------------------------------------------
+Write-Step "6/6 端到端模拟（scripts/e2e_phone_sim.py --asr fake）"
+$e2eScript = Join-Path $RepoRoot 'scripts\e2e_phone_sim.py'
+if (-not (Test-Path -LiteralPath $e2eScript)) {
+    $message = "缺少 scripts/e2e_phone_sim.py（bridge-core 负责）"
+    if ($AllowMissing) { Write-Skip $message } else { Write-Fail $message }
+}
+elseif (-not $WithE2E) {
+    Write-Skip "未指定 -WithE2E，跳过端到端模拟（默认不跑：会启动临时 Bridge/本地 socket、耗时数十秒；需要时加 -WithE2E 真跑 python scripts/e2e_phone_sim.py --asr fake）"
+}
+else {
+    # 用 .NET Process + 超时：E2E 会起临时 Bridge，异常时避免挂死整个 run_tests。
+    $e2ePsi = New-Object System.Diagnostics.ProcessStartInfo
+    $e2ePsi.FileName = $Python
+    $e2ePsi.Arguments = '"' + $e2eScript + '" --asr fake'
+    $e2ePsi.WorkingDirectory = $RepoRoot
+    $e2ePsi.UseShellExecute = $false
+    $e2ePsi.CreateNoWindow = $true
+    $e2ePsi.RedirectStandardOutput = $true
+    $e2ePsi.RedirectStandardError = $true
+    $e2eProc = New-Object System.Diagnostics.Process
+    $e2eProc.StartInfo = $e2ePsi
+    Write-Host "[run-tests] python scripts/e2e_phone_sim.py --asr fake（超时 600s）"
+    $e2eStarted = $false
+    try { $e2eStarted = $e2eProc.Start() }
+    catch { Write-Fail "端到端模拟无法启动：$($_.Exception.Message)" }
+    if ($e2eStarted) {
+        $e2eOutTask = $e2eProc.StandardOutput.ReadToEndAsync()
+        $e2eErrTask = $e2eProc.StandardError.ReadToEndAsync()
+        $e2eFinished = $e2eProc.WaitForExit(600000)
+        if (-not $e2eFinished) {
+            try { $e2eProc.Kill() } catch { }
+            $null = $e2eProc.WaitForExit(5000)
+            Write-Fail "端到端模拟超过 600s 未结束（已强制终止）"
+        }
+        else {
+            $e2eOut = ''
+            $e2eErr = ''
+            try { if ($e2eOutTask.Wait(10000)) { $e2eOut = $e2eOutTask.Result } } catch { }
+            try { if ($e2eErrTask.Wait(10000)) { $e2eErr = $e2eErrTask.Result } } catch { }
+            if ($e2eProc.ExitCode -ne 0) {
+                if ($e2eErr) { ($e2eErr -split "`n") | Select-Object -Last 30 | ForEach-Object { Write-Host $_ } }
+                if ($e2eOut) { ($e2eOut -split "`n") | Select-Object -Last 30 | ForEach-Object { Write-Host $_ } }
+                Write-Fail "端到端模拟失败（exit $($e2eProc.ExitCode)，ASR=fake；脚本属 bridge-core）"
+            }
+            else {
+                if ($e2eOut) { ($e2eOut -split "`n") | Select-Object -Last 12 | ForEach-Object { Write-Host $_ } }
+                Write-Pass "端到端模拟通过（ASR=fake）"
+            }
+        }
+    }
 }
 
 # ---------------------------------------------------------------------------

@@ -4,6 +4,9 @@ import assert from 'node:assert/strict';
 import {
   MockTransport,
   MOCK_PAIRING,
+  MOCK_SCAN_RESULT,
+  MOCK_SAMPLE_IMAGES,
+  MOCK_SESSION_META,
   MOCK_SCENARIOS,
   MOCK_LATENCY,
   pickScenario,
@@ -285,11 +288,35 @@ test('token, route, export and scan commands emit native-shaped events', () => {
   const exported = events.misc.find((e) => e.type === 'logs.exported');
   assert.ok(exported);
   assert.match(exported.text, /DSH Phone web demo log/);
+});
 
-  return transport.scanPairing().then((result) => {
-    assert.equal(result.supported, true);
-    assert.equal(result.code, MOCK_PAIRING.code);
-  });
+test('scanPairing resolves a v1.1 QR result with hosts/name (D-030)', async () => {
+  const { transport, scheduler } = createMock();
+  const pending = transport.scanPairing();
+  scheduler.advanceBy(MOCK_LATENCY.scan);
+  const result = await pending;
+  assert.equal(result.ok, true);
+  assert.equal(result.host, MOCK_SCAN_RESULT.host);
+  assert.equal(result.code, MOCK_PAIRING.code);
+  assert.deepEqual(result.hosts, MOCK_SCAN_RESULT.hosts);
+  assert.equal(result.name, MOCK_SCAN_RESULT.name);
+});
+
+test('scanPairing and pickImage surface failures through hooks (D-029/030)', async () => {
+  const { transport, scheduler } = createMock();
+  transport.scanFailure = 'permission_denied';
+  const scanPending = transport.scanPairing();
+  scheduler.advanceBy(MOCK_LATENCY.scan);
+  const scan = await scanPending;
+  assert.equal(scan.ok, false);
+  assert.equal(scan.reason, 'permission_denied');
+
+  transport.pickFailure = 'too_large';
+  const pickPending = transport.pickImage('camera');
+  scheduler.advanceBy(MOCK_LATENCY.pick);
+  const pick = await pickPending;
+  assert.equal(pick.ok, false);
+  assert.equal(pick.reason, 'too_large');
 });
 
 test('resync replays missed messages after a drop', () => {
@@ -323,4 +350,68 @@ test('pendingTimers() reports leaks and clears on disconnect', () => {
   assert.equal(ctx.events.states.at(-1).state, 'closed');
   assert.equal(sched.pendingCount(), 0);
   assert.equal(scheduler.now(), sched.now());
+});
+
+test('pickImage resolves an embedded demo image and media.get serves it back', async () => {
+  const ctx = createMock();
+  const { transport, scheduler, events } = ctx;
+  connectPairAndAuth(ctx);
+
+  const pickPending = transport.pickImage('gallery');
+  scheduler.advanceBy(MOCK_LATENCY.pick);
+  const picked = await pickPending;
+  assert.equal(picked.ok, true);
+  assert.equal(picked.mimeType, MOCK_SAMPLE_IMAGES.gallery.mimeType);
+  assert.equal(picked.data, MOCK_SAMPLE_IMAGES.gallery.data);
+
+  transport.send({
+    type: MsgType.CHAT_SEND,
+    clientId: 'img-1',
+    sessionId: 'demo-session-1',
+    text: '',
+    images: [{ mimeType: picked.mimeType, data: picked.data, name: picked.name, width: picked.width, height: picked.height }],
+  });
+  scheduler.advanceBy(MOCK_LATENCY.tool + MOCK_LATENCY.deltaGap * 4);
+  const userMessage = events.messages.find((m) => m.type === MsgType.CHAT_ACK);
+  assert.ok(userMessage);
+  const withImages = transport
+    ._sessions
+    .get('demo-session-1')
+    .messages.find((m) => m.role === 'user' && Array.isArray(m.images) && m.images.length === 1);
+  assert.ok(withImages, 'user message keeps image metadata');
+  const mediaId = withImages.images[0].mediaId;
+  assert.match(mediaId, /^md-demo-\d+$/);
+
+  const mediaPending = transport.mediaGet(mediaId);
+  scheduler.advanceBy(MOCK_LATENCY.media);
+  const media = await mediaPending;
+  assert.equal(media.ok, true);
+  assert.equal(media.media.mediaId, mediaId);
+  assert.equal(media.media.data, MOCK_SAMPLE_IMAGES.gallery.data);
+
+  const missing = transport.mediaGet('md-missing');
+  scheduler.advanceBy(MOCK_LATENCY.media);
+  const notFound = await missing;
+  assert.equal(notFound.ok, false);
+  assert.equal(notFound.code, 3001);
+});
+
+test('session.resume pushes session.meta and done carries usage (D-032)', () => {
+  const ctx = createMock();
+  const { transport, scheduler, events } = ctx;
+  connectPairAndAuth(ctx);
+
+  transport.send({ type: MsgType.SESSION_RESUME, sessionId: 'demo-session-1', _reqId: 'resume-1' });
+  const meta = events.messages.find((m) => m.type === MsgType.SESSION_META);
+  assert.ok(meta, 'session.meta follows resume.ok');
+  assert.equal(meta.model, MOCK_SESSION_META.default.model);
+  assert.equal(meta.contextWindow, MOCK_SESSION_META.default.contextWindow);
+
+  transport.send({ type: MsgType.CHAT_SEND, clientId: 'c-meta', sessionId: 'demo-session-1', text: '你好' });
+  scheduler.advanceBy(10_000);
+  const done = events.messages.find((m) => m.type === MsgType.ASSISTANT_DONE);
+  assert.ok(done);
+  assert.ok(done.usage, 'assistant.done includes usage');
+  assert.ok(done.usage.usedTokens > 0);
+  assert.equal(done.usage.contextWindow, MOCK_SESSION_META.default.contextWindow);
 });

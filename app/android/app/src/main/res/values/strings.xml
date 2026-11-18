@@ -13,4 +13,7 @@
     <string name="fallback_title">Web assets are not bundled</string>
     <string name="fallback_body">Run scripts/sync_web.ps1 (or scripts/sync_web.sh) before building so that app/web is packaged inside the APK.</string>
     <string name="fallback_hint">Expected at app/android/app/src/main/assets/web/</string>
+
+    <string name="scan_hint">Point the camera at the pairing QR code on your computer</string>
+    <string name="scan_cancel">Cancel</string>
 </resources>

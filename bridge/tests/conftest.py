@@ -36,7 +36,7 @@ DEVICE_NAME = "pytest phone"
 # 沙箱下系统临时目录不可写，测试临时目录放在 workspace 内（bridge/state/ 已被
 # .gitignore 忽略，且 rmtree 会尽量清理）。
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_TMP_ROOT = _REPO_ROOT / "bridge" / "state" / "pytest"
+_TMP_ROOT = _REPO_ROOT / "bridge" / "state" / "workdirs"
 
 
 @pytest.fixture()
@@ -50,15 +50,44 @@ def workdir() -> Iterator[Path]:
         shutil.rmtree(path, ignore_errors=True)
 
 
-def make_config(base_dir: Path) -> BridgeConfig:
-    """构造测试配置：port=0（由系统分配），所有状态文件落在 base_dir 下。"""
+@pytest.fixture()
+def tmp_path(request: pytest.FixtureRequest) -> Iterator[Path]:
+    """覆盖 pytest 自带 ``tmp_path``（沙箱下无法写入 basetemp）。
+
+    本会话沙箱对 pytest 在 ``--basetemp`` 下创建/清理目录会抛 WinError 5，
+    改为在 workspace 内 ``bridge/state/workdirs/<nodeid-hash>`` 建临时目录，
+    测试结束尽力删除（bridge/state/ 已 gitignore）。
+    """
+    del request
+    _TMP_ROOT.mkdir(parents=True, exist_ok=True)
+    path = _TMP_ROOT / uuid.uuid4().hex
+    path.mkdir()
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def make_config(
+    base_dir: Path,
+    *,
+    dsh: DshConfig | None = None,
+    bind_all: bool = False,
+) -> BridgeConfig:
+    """构造测试配置：port=0（由系统分配），所有状态文件落在 base_dir 下。
+
+    v1.1 起 ``DshConfig`` 默认 enabled=True；测试必须显式 fake（enabled=False），
+    否则会尝试启动真实 SDK。
+    """
     return BridgeConfig(
-        server=ServerConfig(host="127.0.0.1", port=0, max_connections=8),
+        server=ServerConfig(
+            host="127.0.0.1", port=0, max_connections=8, bind_all=bind_all
+        ),
         tls=TlsConfig(
             cert_file="state/certs/bridge.crt",
             key_file="state/certs/bridge.key",
         ),
-        dsh=DshConfig(enabled=False, home="state/dsh_home"),
+        dsh=dsh or DshConfig(enabled=False, home="state/dsh_home"),
         asr=AsrConfig(
             mode="fake",
             lang="zh",

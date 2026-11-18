@@ -26,7 +26,8 @@ from .connection import Connection, DeviceSession
 from .dsh import DshClient, create_dsh_client
 from .history import HistoryStore
 from .logging_setup import setup_logging
-from .qr import print_qr
+from .netinfo import computer_name, pairing_hosts
+from .qr import print_qr, save_qr_png
 
 logger = logging.getLogger("bridge.server")
 
@@ -74,6 +75,12 @@ class BridgeServer:
         self.server_id = ""
         self.host = config.server.host
         self.port = int(config.server.port)
+        #: 实际 ``serve()`` 绑定地址（bindAll=true 时为 0.0.0.0）。
+        self.listen_host = config.server.host
+        #: v1.1：配对 URI 的 hosts=/name= 与 state/qr.png 路径（D-031）。
+        self.pair_hosts: list[str] = []
+        self.computer_name = computer_name()
+        self.qr_png_path: Path | None = None
         self._device_store: DeviceStore | None = None
         self._server: Server | None = None
         self._connections: set[Connection] = set()
@@ -99,7 +106,7 @@ class BridgeServer:
         return self.auth.ensure_pair_code().code
 
     def pairing_uri(self) -> str:
-        """当前配对 URI（二维码内容）。"""
+        """当前配对 URI（二维码内容；v1.1 带 hosts/name）。"""
         if self.auth is None:
             raise RuntimeError("server not started")
         return pair_uri(
@@ -108,6 +115,8 @@ class BridgeServer:
             fingerprint=self.fingerprint,
             code=self.auth.ensure_pair_code().code,
             server_id=self.server_id,
+            hosts=self.pair_hosts,
+            name=self.computer_name,
         )
 
     def get_device_session(self, device_id: str) -> DeviceSession:
@@ -131,6 +140,27 @@ class BridgeServer:
         self.config.log_dir.mkdir(parents=True, exist_ok=True)
         self.config.cert_file.parent.mkdir(parents=True, exist_ok=True)
         self.config.dsh_home.mkdir(parents=True, exist_ok=True)
+
+        # 监听地址 / 配对候选（D-031）
+        if self.config.server.bind_all:
+            self.listen_host = "0.0.0.0"
+            hosts = pairing_hosts("")
+            self.host = hosts[0] if hosts else self.config.server.host
+            self.pair_hosts = hosts
+            logger.warning(
+                "server.bind_all",
+                extra={
+                    "event": "server.bind_all",
+                    "fields": {
+                        "listen": self.listen_host,
+                        "hint": "已监听所有网卡，请只在可信网络使用；配对 URI 使用本机私网地址。",
+                    },
+                },
+            )
+        else:
+            self.listen_host = self.config.server.host
+            self.host = self.config.server.host
+            self.pair_hosts = pairing_hosts(self.host)
 
         # 证书 / 指纹 / serverId
         cert = load_or_create_cert(
@@ -158,7 +188,7 @@ class BridgeServer:
         try:
             self._server = await serve(
                 self._handle_connection,
-                self.host,
+                self.listen_host,
                 self.port,
                 ssl=ssl_context,
                 subprotocols=[SUBPROTOCOL],
@@ -171,7 +201,9 @@ class BridgeServer:
             )
         except OSError as exc:
             await self._shutdown_resources()
-            raise RuntimeError(f"无法监听 {self.host}:{self.port}: {exc}") from exc
+            raise RuntimeError(
+                f"无法监听 {self.listen_host}:{self.port}: {exc}"
+            ) from exc
 
         sockets = self._server.sockets or []
         if sockets:
@@ -185,7 +217,8 @@ class BridgeServer:
             extra={
                 "event": "server.started",
                 "fields": {
-                    "host": self.host,
+                    "host": self.listen_host,
+                    "hosts": self.pair_hosts,
                     "port": self.port,
                     "serverId": self.server_id,
                     "fingerprint": self.fingerprint,
@@ -294,26 +327,37 @@ class BridgeServer:
     # -- 配对引导 ---------------------------------------------------------
 
     def print_pairing(self, *, code: str | None = None) -> None:
-        """在终端打印配对信息与二维码（编码不支持时降级为 ASCII 文案）。"""
+        """在终端打印配对信息、二维码与 state/qr.png 路径（D-031）。"""
         if self.auth is None:
             return
         pair_code = self.auth.ensure_pair_code()
-        uri = pair_uri(
+        uri = self.pairing_uri() if code is None else pair_uri(
             host=self.host,
             port=self.port,
             fingerprint=self.fingerprint,
-            code=code if code is not None else pair_code.code,
+            code=code,
             server_id=self.server_id,
+            hosts=self.pair_hosts,
+            name=self.computer_name,
         )
         ttl = self.config.security.pair_code_ttl_sec
+        # PROTOCOL §5.1：同一 URI 必须渲染成 state/qr.png（≥512×512，纠错 M）
+        qr_path = save_qr_png(uri, self.config.state_dir / "qr.png", min_size=512)
+        self.qr_png_path = Path(qr_path) if qr_path else None
         try:
             print("\n".join(self._pairing_lines(pair_code.code, ttl)))
             print_qr(uri, indent="  ")
+            if qr_path:
+                print(f"  二维码图片: {qr_path}")
+            else:
+                print("  [警告] 无法生成 state/qr.png（缺少 qrcode/Pillow），请使用配对 URI。")
             print(f"  配对 URI: {uri}")
             print()
         except (UnicodeEncodeError, OSError):  # pragma: no cover - 极端终端
             try:
                 print("\n".join(self._pairing_lines(pair_code.code, ttl, ascii_only=True)))
+                if qr_path:
+                    print(f"  QR image: {qr_path}")
                 print(f"  Pairing URI: {uri}")
                 print()
             except OSError:

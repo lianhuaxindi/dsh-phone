@@ -12,6 +12,7 @@
  *   listSessions() / saveSession() / deleteSession()
  *   getMessages(sessionId) / saveMessage() / saveMessages() / clearSessionMessages()
  *   getDraft(sessionId) / saveDraft(sessionId, text) / deleteDraft(sessionId)
+ *   getMedia(mediaId) / saveMedia(media) / deleteMedia(mediaId)  (v1.1 image cache)
  *   clearAll()
  */
 
@@ -119,6 +120,27 @@ export function normalizeDraft(text) {
   return value.length > PROTOCOL.maxTextChars ? value.slice(0, PROTOCOL.maxTextChars) : value;
 }
 
+/**
+ * Normalize a cached media record (v1.1 `media.get` result, D-029). Records
+ * without a media id or base64 payload are dropped by the callers.
+ * @param {unknown} raw
+ * @returns {{mediaId: string, mimeType: string, data: string, width: number, height: number, sizeBytes: number} | null}
+ */
+export function normalizeMediaCacheRecord(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const mediaId = typeof raw.mediaId === 'string' ? raw.mediaId.trim() : '';
+  const data = typeof raw.data === 'string' ? raw.data : '';
+  if (!mediaId || !data) return null;
+  return {
+    mediaId,
+    mimeType: typeof raw.mimeType === 'string' && /^image\/[a-z0-9.+-]+$/i.test(raw.mimeType) ? raw.mimeType.toLowerCase() : 'image/jpeg',
+    data,
+    width: Number.isInteger(raw.width) && raw.width > 0 ? raw.width : 0,
+    height: Number.isInteger(raw.height) && raw.height > 0 ? raw.height : 0,
+    sizeBytes: Math.max(0, Math.round(Number(raw.sizeBytes) || Math.round((data.length * 3) / 4))),
+  };
+}
+
 function byUpdatedDesc(a, b) {
   return b.updatedAt - a.updatedAt;
 }
@@ -133,7 +155,7 @@ function byCreatedAsc(a, b) {
 
 /** In-memory store with the same async API as the IndexedDB backend. */
 export class MemoryStore {
-  /** @param {{settings?: object, sessions?: object[], messages?: object[], drafts?: object}} [seed] */
+  /** @param {{settings?: object, sessions?: object[], messages?: object[], drafts?: object, media?: object[]}} [seed] */
   constructor(seed = {}) {
     this.backend = 'memory';
     this._settings = normalizeSettings(seed.settings);
@@ -141,9 +163,14 @@ export class MemoryStore {
     this._sessions = new Map();
     this._messages = new Map();
     this._drafts = new Map();
+    this._media = new Map();
     for (const [sessionId, text] of Object.entries(seed.drafts ?? {})) {
       const draft = normalizeDraft(text);
       if (draft) this._drafts.set(String(sessionId), draft);
+    }
+    for (const raw of seed.media ?? []) {
+      const record = normalizeMediaCacheRecord(raw);
+      if (record) this._media.set(record.mediaId, record);
     }
     for (const session of seed.sessions ?? []) {
       const record = normalizeSessionRecord(session);
@@ -238,10 +265,29 @@ export class MemoryStore {
     this._drafts.delete(String(sessionId));
   }
 
+  /** Cached image bytes for a message `mediaId` (null when not cached). */
+  async getMedia(mediaId) {
+    const record = this._media.get(String(mediaId));
+    return record ? { ...record } : null;
+  }
+
+  /** Cache image bytes; invalid records are ignored. */
+  async saveMedia(media) {
+    const record = normalizeMediaCacheRecord(media);
+    if (!record) return null;
+    this._media.set(record.mediaId, record);
+    return { ...record };
+  }
+
+  async deleteMedia(mediaId) {
+    this._media.delete(String(mediaId));
+  }
+
   async clearAll() {
     this._sessions.clear();
     this._messages.clear();
     this._drafts.clear();
+    this._media.clear();
     this._settings = normalizeSettings();
     this._deviceId = null;
   }
@@ -504,6 +550,47 @@ export class IndexedDbStore {
 
   async deleteDraft(sessionId) {
     return this.saveDraft(sessionId, '');
+  }
+
+  /* --------------------------------------------------------------- media */
+
+  async getMedia(mediaId) {
+    const key = `media:${String(mediaId)}`;
+    const db = await this.#db();
+    if (!db) return this._fallback.getMedia(mediaId);
+    try {
+      const row = await requestToPromise(db.transaction(STORE_META, 'readonly').objectStore(STORE_META).get(key));
+      return normalizeMediaCacheRecord(row?.value);
+    } catch {
+      return this._fallback.getMedia(mediaId);
+    }
+  }
+
+  async saveMedia(media) {
+    const record = normalizeMediaCacheRecord(media);
+    if (!record) return null;
+    const key = `media:${record.mediaId}`;
+    const db = await this.#db();
+    if (!db) return this._fallback.saveMedia(record);
+    try {
+      const transaction = db.transaction(STORE_META, 'readwrite');
+      transaction.objectStore(STORE_META).put({ key, value: record });
+      await txDone(transaction);
+    } catch {
+      return this._fallback.saveMedia(record);
+    }
+    return { ...record };
+  }
+
+  async deleteMedia(mediaId) {
+    const key = `media:${String(mediaId)}`;
+    const db = await this.#db();
+    if (!db) return this._fallback.deleteMedia(mediaId);
+    try {
+      await this.#withStore(STORE_META, 'readwrite', (store) => store.delete(key));
+    } catch {
+      return this._fallback.deleteMedia(mediaId);
+    }
   }
 }
 

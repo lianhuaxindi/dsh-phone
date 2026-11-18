@@ -107,6 +107,7 @@ bridge/
 host = "127.0.0.1"      # 禁止 0.0.0.0；局域网填具体网卡 IP
 port = 8765
 maxConnections = 4
+bindAll = false         # v1.1：显式打开才监听 0.0.0.0（公共 Wi-Fi 多网卡场景），启动打 WARNING
 
 [tls]
 certFile = "state/certs/bridge.crt"
@@ -115,8 +116,14 @@ keyFile  = "state/certs/bridge.key"
 [dsh]
 enabled = true           # false = 假 DSH（CI/联调）
 home = "state/dsh_home"
-provider = ""
-model = ""
+provider = "deepseek-official"
+model = "deepseek-flash"        # 官方当前模型（DeepSeek-V4.1-Flash），1M 上下文、支持 Vision
+reasoningEffort = "high"        # low | high | max
+maxTokens = 384000              # 官方上限 384K
+contextWindowTokens = 1000000   # 展示兜底；运行时 request/context 有值则优先
+runtimeExe = ""                 # 留空 = 自动解析本机 DSH runtime（D-022）
+apiKey = ""                     # 用户填写；留空读 DEEPSEEK_API_KEY / DSH_PHONE_API_KEY
+baseUrl = "https://api.deepseek.com"
 
 [asr]
 mode = "fake"            # fake | sherpa
@@ -174,7 +181,8 @@ Web → Native（`window.DshNative.post(msg)`）：
 | `notify` | `{title,text}` | —（审批后台提醒，P1） |
 | `exportLogs` | `{}` | `logs.exported`（脱敏） |
 | `reconnect` | `{}` | `net.state`（诊断页「重连 Bridge」；断开并重建连接，**不**重启 Bridge 进程，见 D-013） |
-| `scanPairing` | `{ }` | `scanPairing.result`（V1 固定返回 `{supported:false,reason:"m3"}`，见 D-011；Web 另兼容旧别名 scan.result，M3 可清理） |
+| `scanPairing` | `{}` | `scanPairing.result`（v1.1 真实现：Camera2 + ZXing 本地解码，见 D-030；成功 `{ok:true,uri,host,port,fp,code,sid,hosts,name?}`，失败 `{ok:false,reason}`） |
+| `pickImage` | `{source:"camera"/"gallery"}` | `image.picked`（`{data(base64),mimeType,name,width,height}`，Native 已缩放至长边 ≤1600 并重编码 JPEG q≈0.8）/ `image.pickFailed`（`{reason}`，见 D-029） |
 
 Native → Web（`window.DshBridge.onEvent(json)`）：`net.state` / `proto.message`（协议原样透传）/ `audio.state` / `audio.route` / `audio.level`（波形）/ `error`。
 
@@ -199,9 +207,12 @@ Native → Web（`window.DshBridge.onEvent(json)`）：`net.state` / `proto.mess
 - **`_reqId` / `_reqTo`**：Web 可在消息里带本地字段 `_reqId`（任意字符串），Native **剥离后不出网**；Native 收到服务端消息若其 `replyTo` 命中某个已发出的 `seq`，把对应 `_reqId` 回填为 `_reqTo` 一并转发给 Web。Web 匹配响应优先用 `_reqTo`，其次 `clientId`（`chat.ack`）、`id`（审批/提问）。Mock 传输必须模拟同一行为，保证 mock 与真机一致。
 - **Web 资源 origin**：`https://appassets.local/`，由 `shouldInterceptRequest` 从 `assets/web/` 读。必须给正确 MIME（`.js`→`text/javascript`、`.json`→`application/json`、`.css`→`text/css`），否则 ES module 加载失败；`index.html` 内一律用相对路径（`./js/...`），保证 `python -m http.server` 也能调试。
 - **返回键**：`window.DshBridge.onBack(): boolean`，返回 `true` 表示已由 UI 处理（关闭 Sheet / 返回列表）；`false` 交给系统。
+- **`net.state` 枚举（v1.1 冻结）**：`idle | connecting | online | closed | error`；`error` 可带 `{reason, message?, tried?:[{host,port,elapsedMs,error}]}` 用于多地址全败的可诊断信息（D-031/D-034）。Web 把 `error` 与任何未知 state 都按「已断开」渲染，并把 `tried` 显示到诊断页。
 - **重连**：由 Native 自动负责（退避 1/2/4/8/15s），Web 只消费 `net.state`；诊断页「重连 Bridge」= `reconnect` op（D-013）。
 - **音频**：二进制帧由 Native 直发，不经 WebView。
-- **扫码**：M2 手动输入配对（host/port/fp/code，或粘贴整条 `dsphone://pair...` URI）；`scanPairing` 为预留 op（D-011）。
+- **扫码**：v1.1 起 `scanPairing` 真实现（Camera2 + ZXing core 本地解码，D-030）；手动输入 host/port/fp/code 或粘贴整条 `dsphone://pair...` URI 仍保留为兜底。
+- **多地址连接**：`dsphone://pair` 可带 `hosts[]`（逗号分隔），Native 按 `host`→`hosts` 顺序尝试、每地址 3 秒超时、首个成功即用并记住（D-031）。
+- **图片**：Web 只把 `pickImage` 的结果（base64）放进 `chat.send.images`；拍照/相册/缩放/重编码全在 Native（D-029）。
 
 ### 3.3 UI 状态机
 
@@ -227,6 +238,17 @@ PTT 按下 → Native 切 SCO(setCommunicationDevice) → audio.start
         （过程中审批/提问 → approval.request / question.request → 弹窗 → response）
 ```
 
+## 4.1 数据流（图片消息，v1.1）
+
+```
+拍照/相册(pickImage) → Native: 解码→缩放到长边≤1600→JPEG q0.8→base64
+        → Web 乐观渲染缩略图 → chat.send{text, images:[{mimeType,data,...}]}
+        → Bridge: magic-bytes 校验(≤4 张/单张 2MiB/合计 6MiB) → 落盘 state/media/<sha256>.<ext>
+        → 剥掉 base64 → SDK content blocks [{type:"text"},{type:"image",data,mimeType}]
+        → DSH runtime → assistant.delta → assistant.done{usage}
+历史回放：Message.images[{mediaId,...}] → media.get → media.data（IndexedDB 缓存）
+```
+
 ## 5. 可观测性
 
 - 结构化日志（JSON 行）：`ts, level, event, connId, sessionId, code, latency{}`。
@@ -242,6 +264,9 @@ PTT 按下 → Native 切 SCO(setCommunicationDevice) → audio.start
 | 协议一致性 | `python -m pytest bridge\tests\test_protocol.py` | 每 PR |
 | Web UI 单测 | `node --test app\web\tests` | 每 PR |
 | APK | `cd app\android; ./gradlew assembleDebug` | ubuntu + JDK17 |
+| APK（本机） | `powershell -File scripts\start_bridge.ps1` 无关；按 `app/android/BUILD-LOCAL.md` 用 `.tools/android` 工具链 | 已实测（D-027） |
+| Android 静态自检 | `python app/android/tools/{verify_protocol,check_contract,check_kotlin_static,check_gradle_config}.py` | 每 PR |
+| 端到端（模拟手机） | `python scripts\e2e_phone_sim.py --asr fake` | 手动/每轮 |
 | 模型 | `python scripts\download_models.py`（不入库） | 手动/发布前 |
 
-本机无 JDK/Android SDK → APK 只在 CI 构建（见 `docs/DECISIONS.md` D-006）。
+**本机构建**：JDK17 + Android SDK + Gradle 已装在 `.tools/android/`（gitignore），本机可直接 `assembleDebug` 出 APK（D-027 / `app/android/BUILD-LOCAL.md`）；CI 解锁后仍作为干净机器回归。

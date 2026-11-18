@@ -103,6 +103,11 @@ export class DiagnosticsView {
     this.errorList = h('ul', { class: 'error-list' });
     this.errorEmpty = h('p', { class: 'muted' }, t('diagnostics.noErrors'));
 
+    // v1.1 (D-031): per-address connect diagnostics when host + hosts[] all fail.
+    this.connectDiagMessage = h('p', { class: 'muted' }, '');
+    this.connectDiagList = h('ul', { class: 'error-list' });
+    this.connectDiagEmpty = h('p', { class: 'muted' }, t('diagnostics.connectDiagNone'));
+
     this.logPre = h('pre', { class: 'diagnostics__log mono', tabindex: '0' });
     this.logMeta = h('span', { class: 'muted' });
 
@@ -158,6 +163,7 @@ export class DiagnosticsView {
         h('header', { class: 'screen__header' }, this.backButton, h('h1', { class: 'screen__title' }, t('diagnostics.title')), this.refreshButton),
         this._section(t('diagnostics.versions'), versionRows),
         this._section(t('diagnostics.connection'), connectionRows),
+        this._section(t('diagnostics.connectDiagTitle'), this.connectDiagMessage, this.connectDiagList, this.connectDiagEmpty),
         this._section(t('diagnostics.latency'), this.latencyTable, this.latencyEmpty),
         this._section(t('diagnostics.lastError'), this.errorList, this.errorEmpty),
         this._section(
@@ -232,6 +238,27 @@ export class DiagnosticsView {
     }
     this.latencyTable.hidden = rowCount === 0;
     this.latencyEmpty.hidden = rowCount > 0;
+
+    clear(this.connectDiagList);
+    const connectDiagnostics = data.connectDiagnostics ?? null;
+    const tried = connectDiagnostics?.tried ?? [];
+    this.connectDiagMessage.textContent = connectDiagnostics?.message ?? '';
+    for (const entry of tried) {
+      const host = entry?.host ?? '—';
+      const port = entry?.port ?? '';
+      const elapsed = Number.isFinite(Number(entry?.elapsedMs)) ? `${Math.round(Number(entry.elapsedMs))} ms` : '—';
+      this.connectDiagList.appendChild(
+        h(
+          'li',
+          { class: 'error-list__item' },
+          h('span', { class: 'chip chip--danger mono' }, port ? `${host}:${port}` : String(host)),
+          h('div', { class: 'error-list__body' }, h('span', { class: 'muted mono' }, `${elapsed} · ${entry?.error ?? '—'}`)),
+        ),
+      );
+    }
+    this.connectDiagList.hidden = tried.length === 0;
+    this.connectDiagEmpty.hidden = tried.length > 0;
+    this.connectDiagMessage.hidden = !connectDiagnostics?.message;
 
     clear(this.errorList);
     const errors = data.errors ?? [];

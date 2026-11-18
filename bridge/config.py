@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +31,7 @@ class ServerConfig:
     host: str = "127.0.0.1"
     port: int = 8765
     max_connections: int = 4
+    bind_all: bool = False
 
     @property
     def address(self) -> str:
@@ -49,15 +51,18 @@ class TlsConfig:
 
 @dataclass(frozen=True)
 class DshConfig:
-    """[dsh] 真实 DSH SDK 接入开关与主目录。"""
+    """[dsh] 真实 DSH SDK 接入参数（D-028）。"""
 
-    enabled: bool = False
+    enabled: bool = True
     home: str = "state/dsh_home"
-    provider: str = ""
-    model: str = ""
+    provider: str = "deepseek-official"
+    model: str = "deepseek-flash"
+    reasoning_effort: str = "high"
+    max_tokens: int = 384000
+    context_window_tokens: int = 1000000
     runtime_exe: str = ""
     api_key: str = ""
-    base_url: str = ""
+    base_url: str = "https://api.deepseek.com"
 
 
 @dataclass(frozen=True)
@@ -157,10 +162,14 @@ class BridgeConfig:
         """脱敏前的配置快照（诊断日志用；不含证书私钥内容）。"""
         return {
             "server": {"host": self.server.host, "port": self.server.port,
-                       "maxConnections": self.server.max_connections},
+                       "maxConnections": self.server.max_connections,
+                       "bindAll": self.server.bind_all},
             "tls": {"certFile": self.tls.cert_file, "keyFile": self.tls.key_file},
             "dsh": {"enabled": self.dsh.enabled, "home": self.dsh.home,
                     "provider": self.dsh.provider, "model": self.dsh.model,
+                    "reasoningEffort": self.dsh.reasoning_effort,
+                    "maxTokens": self.dsh.max_tokens,
+                    "contextWindowTokens": self.dsh.context_window_tokens,
                     "runtimeExe": self.dsh.runtime_exe,
                     "apiKey": "***" if self.dsh.api_key else "",
                     "baseUrl": self.dsh.base_url},
@@ -192,9 +201,20 @@ _TOP_LEVEL_SECTIONS = {
 }
 
 _ALLOWED_KEYS: dict[str, set[str]] = {
-    "server": {"host", "port", "maxConnections"},
+    "server": {"host", "port", "maxConnections", "bindAll"},
     "tls": {"certFile", "keyFile"},
-    "dsh": {"enabled", "home", "provider", "model", "runtimeExe", "apiKey", "baseUrl"},
+    "dsh": {
+        "enabled",
+        "home",
+        "provider",
+        "model",
+        "reasoningEffort",
+        "maxTokens",
+        "contextWindowTokens",
+        "runtimeExe",
+        "apiKey",
+        "baseUrl",
+    },
     "asr": {"mode", "lang", "partialRatePerSec", "silenceMs", "modelsDir"},
     "audio": {"sampleRate", "maxStreamSeconds"},
     "security": {
@@ -208,7 +228,9 @@ _ALLOWED_KEYS: dict[str, set[str]] = {
 
 _ASR_MODES = {"fake", "sherpa"}
 _LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+_REASONING_EFFORTS = {"low", "high", "max"}
 _ALLOWED_SAMPLE_RATES = {16000}  # V1 协议固定 16 kHz（640B/20ms/单声道/16bit）
+_API_KEY_ENV_NAMES = ("DEEPSEEK_API_KEY", "DSH_PHONE_API_KEY")
 
 
 def _section(data: Mapping[str, Any], name: str) -> Mapping[str, Any]:
@@ -270,6 +292,18 @@ def _validate_interface(section: str, key: str, value: str) -> str:
     return value
 
 
+def _resolve_api_key(value: str) -> str:
+    """D-028：apiKey 留空时回退环境变量（DEEPSEEK_API_KEY → DSH_PHONE_API_KEY）。"""
+    value = value.strip()
+    if value:
+        return value
+    for env_name in _API_KEY_ENV_NAMES:
+        env_value = os.environ.get(env_name, "").strip()
+        if env_value:
+            return env_value
+    return ""
+
+
 def load_config(path: str | Path) -> BridgeConfig:
     """加载并校验 TOML 配置文件。
 
@@ -310,6 +344,7 @@ def load_config(path: str | Path) -> BridgeConfig:
         max_connections=_require_type(
             "server", "maxConnections", s.get("maxConnections"), int, 4
         ),
+        bind_all=_require_type("server", "bindAll", s.get("bindAll"), bool, False),
     )
     if not 1 <= server.max_connections <= 64:
         raise ConfigError(
@@ -332,16 +367,41 @@ def load_config(path: str | Path) -> BridgeConfig:
     # [dsh]
     d = _section(data, "dsh")
     dsh = DshConfig(
-        enabled=_require_type("dsh", "enabled", d.get("enabled"), bool, False),
+        enabled=_require_type("dsh", "enabled", d.get("enabled"), bool, True),
         home=_validate_interface(
             "dsh", "home", _require_type("dsh", "home", d.get("home"), str, "state/dsh_home")
         ),
-        provider=_require_type("dsh", "provider", d.get("provider"), str, ""),
-        model=_require_type("dsh", "model", d.get("model"), str, ""),
+        provider=_require_type(
+            "dsh", "provider", d.get("provider"), str, "deepseek-official"
+        ),
+        model=_require_type("dsh", "model", d.get("model"), str, "deepseek-flash"),
+        reasoning_effort=_require_type(
+            "dsh", "reasoningEffort", d.get("reasoningEffort"), str, "high"
+        ).strip().lower(),
+        max_tokens=_require_type("dsh", "maxTokens", d.get("maxTokens"), int, 384000),
+        context_window_tokens=_require_type(
+            "dsh", "contextWindowTokens", d.get("contextWindowTokens"), int, 1000000
+        ),
         runtime_exe=_require_type("dsh", "runtimeExe", d.get("runtimeExe"), str, ""),
-        api_key=_require_type("dsh", "apiKey", d.get("apiKey"), str, ""),
-        base_url=_require_type("dsh", "baseUrl", d.get("baseUrl"), str, ""),
+        api_key=_resolve_api_key(
+            _require_type("dsh", "apiKey", d.get("apiKey"), str, "")
+        ),
+        base_url=_require_type(
+            "dsh", "baseUrl", d.get("baseUrl"), str, "https://api.deepseek.com"
+        ),
     )
+    if dsh.reasoning_effort not in _REASONING_EFFORTS:
+        raise ConfigError(
+            f"[dsh].reasoningEffort 必须是 {sorted(_REASONING_EFFORTS)} 之一，"
+            f"收到 {dsh.reasoning_effort!r}"
+        )
+    if not 1 <= dsh.max_tokens <= 384000:
+        raise ConfigError(f"[dsh].maxTokens 必须在 1..384000，收到 {dsh.max_tokens}")
+    if not 1000 <= dsh.context_window_tokens <= 2000000:
+        raise ConfigError(
+            f"[dsh].contextWindowTokens 必须在 1000..2000000，"
+            f"收到 {dsh.context_window_tokens}"
+        )
 
     # [asr]
     a = _section(data, "asr")

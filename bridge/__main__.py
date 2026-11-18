@@ -30,6 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default=None, help="覆盖监听地址（默认取配置文件）")
     parser.add_argument("--port", type=int, default=None, help="覆盖监听端口")
     parser.add_argument(
+        "--bind-all",
+        action="store_true",
+        help="监听 0.0.0.0（等价 [server].bindAll=true；请只在可信网络使用）",
+    )
+    parser.add_argument(
         "--run-for-seconds",
         type=float,
         default=None,
@@ -53,7 +58,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def apply_overrides(
-    config: BridgeConfig, *, host: str | None, port: int | None
+    config: BridgeConfig,
+    *,
+    host: str | None,
+    port: int | None,
+    bind_all: bool = False,
 ) -> BridgeConfig:
     server = config.server
     changed = False
@@ -64,6 +73,9 @@ def apply_overrides(
         if not 1 <= int(port) <= 65535:
             raise ConfigError(f"port 超出范围: {port}")
         server = dataclasses.replace(server, port=int(port))
+        changed = True
+    if bind_all:
+        server = dataclasses.replace(server, bind_all=True)
         changed = True
     if not changed:
         return config
@@ -109,7 +121,9 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         config = load_config(args.config)
-        config = apply_overrides(config, host=args.host, port=args.port)
+        config = apply_overrides(
+            config, host=args.host, port=args.port, bind_all=args.bind_all
+        )
     except ConfigError as exc:
         print(f"配置错误: {exc}", file=sys.stderr)
         return 2

@@ -7,7 +7,7 @@ import { MemoryStore } from '../js/store.js';
 import { Diagnostics } from '../js/diagnostics.js';
 import { ManualScheduler } from '../js/scheduler.js';
 import { PROTOCOL } from '../js/protocol.js';
-import { TransportEvent } from '../js/transport.js';
+import { TransportEvent, TransportState } from '../js/transport.js';
 
 const NOW_MS = 1_700_000_000_000;
 
@@ -452,4 +452,133 @@ test('approval deadline expiry clears the sheet locally with default deny', asyn
   assert.equal(lastApproval, null, 'UI receives APPROVAL null so the sheet can close');
   assert.equal(controller.snapshot().approval, null);
   assert.ok(find(ControllerEvent.TOAST).some((event) => event.payload.key === 'toast.approvalExpired'));
+});
+
+/* ---------------------------------------------------------------- v1.1 */
+
+test('v1.1 top bar: session.meta and assistant.done.usage feed chatMeta (D-032)', async () => {
+  const harness = await createHarness();
+  const { controller, advance, find, events } = harness;
+  await harness.online();
+  await controller.openSession('demo-session-1');
+  await flush();
+
+  const metaEvent = find(ControllerEvent.CHAT_META).at(-1);
+  assert.ok(metaEvent, 'session.meta reaches the UI');
+  const initial = controller.snapshot().chatMeta;
+  assert.equal(initial.model, 'deepseek-flash');
+  assert.equal(initial.modelLabel, 'DeepSeek-V4.1-Flash');
+  assert.equal(initial.reasoningEffort, 'high');
+  assert.equal(initial.contextWindow, 1000000);
+
+  await controller.sendText('你好');
+  await advance(10_000);
+  const after = controller.snapshot().chatMeta;
+  assert.ok(after.usedTokens > 0, 'usage.usedTokens updates the context meter');
+  assert.ok(after.percent > 0);
+  assert.ok(after.usage?.inputTokens > 0);
+
+  // The mock model scenario switches model + reasoning effort and pushes meta.
+  await controller.sendText('切换模型');
+  await advance(10_000);
+  const switched = controller.snapshot().chatMeta;
+  assert.equal(switched.model, 'deepseek-v4-pro');
+  assert.equal(switched.modelLabel, 'DeepSeek-V4-Pro');
+  assert.equal(switched.reasoningEffort, 'max');
+  assert.ok(events.some((event) => event.name === ControllerEvent.CHAT_META));
+});
+
+test('v1.1 images attach to the next turn and reach chat.send.images (D-029)', async () => {
+  const harness = await createHarness();
+  const { controller, transport, advance, find, scheduler } = harness;
+  await harness.online();
+  await controller.openSession('demo-session-1');
+  await flush();
+
+  const pending = controller.attachImage('gallery');
+  await advance(MOCK_LATENCY.pick);
+  const image = await pending;
+  assert.ok(image, 'pickImage resolves the embedded demo image');
+  assert.equal(image.mimeType, 'image/png');
+
+  let snapshot = controller.snapshot();
+  assert.equal(snapshot.pendingImages.length, 1);
+  assert.ok(find(ControllerEvent.PENDING_IMAGES).length >= 1);
+
+  // An image-only message (empty text) must be sendable.
+  const userMessage = await controller.sendText('');
+  assert.ok(userMessage);
+  snapshot = controller.snapshot();
+  assert.equal(snapshot.pendingImages.length, 0, 'attachments clear after send');
+  assert.equal(userMessage.images.length, 1);
+  assert.equal(userMessage.text, '');
+
+  const sent = transport._sessions.get('demo-session-1').messages.find((m) => m.role === 'user' && m.text === '');
+  assert.ok(Array.isArray(sent.images) && sent.images.length === 1, 'wire message carries the image base64');
+  assert.match(sent.images[0].mediaId, /^md-demo-\d+$/);
+  await advance(MOCK_LATENCY.tool + 300);
+  scheduler.flush();
+  await flush();
+});
+
+test('v1.1 4002 invalid image rolls the turn back and keeps the attachment', async () => {
+  const harness = await createHarness();
+  const { controller, transport, advance, find } = harness;
+  await harness.online();
+  await controller.openSession('demo-session-1');
+  await flush();
+
+  const pending = controller.attachImage('camera');
+  await advance(MOCK_LATENCY.pick);
+  const image = await pending;
+  const userMessage = await controller.sendText('看这张图');
+  assert.ok(userMessage);
+
+  transport.emit(TransportEvent.MESSAGE, {
+    type: 'error',
+    code: 4002,
+    message: '图片或请求内容不合法',
+    retryable: false,
+  });
+  await flush();
+
+  const error = find(ControllerEvent.ERROR).at(-1);
+  assert.equal(error.payload.code, 4002);
+  assert.equal(error.payload.scope, 'chat');
+  assert.equal(error.payload.retryable, false);
+
+  const rolledBack = controller.snapshot();
+  assert.equal(rolledBack.phase, 'online', '4002 does not leave the session busy');
+  assert.equal(rolledBack.pendingImages.length, 1, 'the image is restored so the user can resend');
+  assert.equal(rolledBack.pendingImages[0].mimeType, image.mimeType);
+  const updated = find(ControllerEvent.MESSAGE_UPDATED)
+    .filter((event) => event.payload.message.messageId === userMessage.messageId)
+    .at(-1);
+  assert.equal(updated.payload.message.status, 'error');
+});
+
+test('v1.1 all-addresses-failed exposes tried address diagnostics (D-031/D-034)', async () => {
+  const harness = await createHarness();
+  const { controller, transport, find } = harness;
+
+  await controller.connectPairing(MOCK_PAIRING);
+  await flush();
+  transport.emitState(TransportState.FAILED, {
+    reason: 'all_addresses_failed',
+    message: '所有地址均连接失败',
+    tried: [{ host: '192.168.1.10', port: 8765, elapsedMs: 3000, error: 'timeout' }],
+  });
+  await flush();
+
+  const error = find(ControllerEvent.ERROR).at(-1);
+  assert.equal(error.payload.scope, 'connect');
+  assert.equal(error.payload.code, 5001);
+  assert.equal(error.payload.tried.length, 1);
+
+  const data = controller.getDiagnostics();
+  assert.ok(data.connectDiagnostics, 'connect diagnostics survive for the diagnostics screen');
+  assert.equal(data.connectDiagnostics.message, '所有地址均连接失败');
+  assert.deepEqual(data.connectDiagnostics.tried, [
+    { host: '192.168.1.10', port: 8765, elapsedMs: 3000, error: 'timeout' },
+  ]);
 });

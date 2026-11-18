@@ -34,6 +34,18 @@ J  Pairing: `0.0.0.0` is rejected as a host and appears nowhere else.
 K  Audio permission: RECORD_AUDIO is checked before starting the recorder.
 L  Kotlin syntax sanity: brackets balanced per file after stripping strings and
    comments (catches gross copy/paste damage that would redden CI immediately).
+M  v1.1 scan pairing (D-030): CAMERA permission + uses-feature required=false,
+   ScanActivity registered exported=false, Camera2 + ZXing QR decode path,
+   runtime CAMERA request and typed cancel/permission reasons.
+N  v1.1 image pipeline (D-029): custom ContentProvider authority registered with
+   grantUriPermissions, cache-only files, BitmapFactory + JPEG q≈0.8 re-encode,
+   long edge cap 1600 and Base64.NO_WRAP; pickImage/scanPairing bridge branches
+   plus onShowFileChooser and camera/gallery intents in MainActivity.
+O  v1.1 native event names: scanPairing.result / image.picked / image.pickFailed
+   are emitted (no stale `supported:false, reason:"m3"` stub).
+P  v1.1 multi-address (D-031): Pairing hosts/name parsing, AddressCandidates
+   3 s attempt timeout, WssClient fallback + all_addresses_failed diagnostics,
+   SettingsStore remembers last/known hosts.
 
 This is a static analysis only — it does NOT build the APK.
 """
@@ -386,6 +398,124 @@ def check_bracket_balance(sources: dict[Path, tuple[str, str]]) -> None:
             fail(f"{rel(path)}: nested generics `<<` without `>>` (Kotlin needs spaces)")
 
 
+# --------------------------------------------------------------------------- M
+def check_scan_pairing(sources: dict[Path, tuple[str, str]]) -> None:
+    manifest = read_text(SRC_ROOT / "AndroidManifest.xml")
+    required_manifest = (
+        ("android.permission.CAMERA", "CAMERA permission"),
+        ('android.hardware.camera', "camera uses-feature"),
+        ('required="false"', "camera uses-feature required=false"),
+        (".ScanActivity", "ScanActivity registration"),
+    )
+    for token, what in required_manifest:
+        if token not in manifest:
+            fail(f"AndroidManifest.xml: missing {what} (`{token}`)")
+    scan = read_text(SRC_ROOT / "java" / "com" / "dsh" / "phone" / "ScanActivity.kt")
+    if not scan:
+        fail("ScanActivity.kt: v1.1 QR scanner missing")
+        return
+    for token in (
+        "CameraManager",
+        "ImageReader",
+        "MultiFormatReader",
+        "BarcodeFormat.QR_CODE",
+        "checkSelfPermission(Manifest.permission.CAMERA)",
+        "requestPermissions(",
+        "RESULT_OK",
+        "RESULT_CANCELED",
+        "REASON_PERMISSION_DENIED",
+        "REASON_NO_CAMERA",
+    ):
+        if token not in scan:
+            fail(f"ScanActivity.kt: QR scanner incomplete: missing `{token}`")
+
+
+# --------------------------------------------------------------------------- N
+def check_media_pipeline(sources: dict[Path, tuple[str, str]]) -> None:
+    java_root = SRC_ROOT / "java" / "com" / "dsh" / "phone"
+    manifest = read_text(SRC_ROOT / "AndroidManifest.xml")
+    for token in (
+        'android:name=".storage.ImageFileProvider"',
+        'android:authorities="com.dsh.phone.fileprovider"',
+        'android:grantUriPermissions="true"',
+    ):
+        if token not in manifest:
+            fail(f"AndroidManifest.xml: image FileProvider incomplete: missing `{token}`")
+
+    provider = read_text(java_root / "storage" / "ImageFileProvider.kt")
+    if not provider:
+        fail("storage/ImageFileProvider.kt: missing custom ContentProvider for camera output")
+    else:
+        for token in ("ContentProvider", "com.dsh.phone.fileprovider", "openFile", "cacheDir"):
+            if token not in provider:
+                fail(f"ImageFileProvider.kt: missing `{token}`")
+
+    picker = read_text(java_root / "media" / "ImagePicker.kt")
+    if not picker:
+        fail("media/ImagePicker.kt: missing native image downscale pipeline")
+    else:
+        for token in ("BitmapFactory", "CompressFormat.JPEG", "Base64.NO_WRAP", "MAX_IMAGE_BYTES", "ImageScaler"):
+            if token not in picker:
+                fail(f"ImagePicker.kt: missing `{token}`")
+
+    scaler = read_text(java_root / "media" / "ImageScaler.kt")
+    if "MAX_LONG_EDGE = 1600" not in scaler:
+        fail("ImageScaler.kt: long edge cap is not 1600 px (D-029)")
+    if "JPEG_QUALITY = 80" not in scaler:
+        fail("ImageScaler.kt: JPEG quality is not 80 (D-029)")
+
+    bridge = read_text(
+        SRC_ROOT / "java" / "com" / "dsh" / "phone" / "bridge" / "DshBridge.kt",
+    )
+    for token in ('"pickImage"', '"scanPairing"', "AppCore.requestScanPairing", "AppCore.requestPickImage"):
+        if token not in bridge:
+            fail(f"bridge/DshBridge.kt: missing v1.1 op wiring `{token}`")
+
+    activity = read_text(SRC_ROOT / "java" / "com" / "dsh" / "phone" / "MainActivity.kt")
+    for token in (
+        "onShowFileChooser",
+        "ACTION_IMAGE_CAPTURE",
+        "ACTION_GET_CONTENT",
+        "FileChooserParams.parseResult",
+    ):
+        if token not in activity:
+            fail(f"MainActivity.kt: missing image picker wiring `{token}`")
+
+
+# --------------------------------------------------------------------------- O
+def check_scan_media_events(sources: dict[Path, tuple[str, str]]) -> None:
+    bridge = read_text(
+        SRC_ROOT / "java" / "com" / "dsh" / "phone" / "bridge" / "DshBridge.kt",
+    )
+    if '"m3"' in bridge and "supported" in bridge:
+        fail("bridge/DshBridge.kt: stale scanPairing stub (`supported:false, reason:\"m3\"`) still present")
+    combined = "\n".join(raw for _path, (raw, _code) in sources.items())
+    for event in ("scanPairing.result", "image.picked", "image.pickFailed"):
+        if f'"{event}"' not in combined:
+            fail(f"native event `{event}` is never emitted (v1.1 contract)")
+
+
+# --------------------------------------------------------------------------- P
+def check_multi_address(sources: dict[Path, tuple[str, str]]) -> None:
+    java_root = SRC_ROOT / "java" / "com" / "dsh" / "phone"
+    pairing = read_text(java_root / "protocol" / "Pairing.kt")
+    for token in ("parseHosts", "isCandidateHost", "val hosts", "val name"):
+        if token not in pairing:
+            fail(f"protocol/Pairing.kt: missing v1.1 `{token}` (D-031)")
+    candidates = read_text(java_root / "net" / "AddressCandidates.kt")
+    if "ATTEMPT_TIMEOUT_MS = 3_000L" not in candidates:
+        fail("net/AddressCandidates.kt: per-address timeout is not 3000 ms (D-031)")
+    wss = read_text(java_root / "net" / "WssClient.kt")
+    for token in ("AddressCandidates.order", "all_addresses_failed", "candidateHosts"):
+        if token not in wss:
+            fail(f"net/WssClient.kt: multi-address fallback incomplete: missing `{token}`")
+    settings = read_text(java_root / "storage" / "SettingsStore.kt")
+    for token in ("last_host", "known_hosts"):
+        if token not in settings:
+            fail(f"storage/SettingsStore.kt: missing remembered address key `{token}`")
+
+
+
 def main() -> int:
     sources = stripped_sources()
     if not sources:
@@ -403,6 +533,10 @@ def main() -> int:
     check_token_storage(sources)
     check_pairing_host_policy(sources)
     check_audio_permission(sources)
+    check_scan_pairing(sources)
+    check_media_pipeline(sources)
+    check_scan_media_events(sources)
+    check_multi_address(sources)
     check_bracket_balance(sources)
 
     for message in FAILS:

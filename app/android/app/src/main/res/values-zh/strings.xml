@@ -13,4 +13,7 @@
     <string name="fallback_title">未打包 Web 资源</string>
     <string name="fallback_body">构建前请先运行 scripts/sync_web.ps1（或 scripts/sync_web.sh），把 app/web 同步进 APK。</string>
     <string name="fallback_hint">预期路径：app/android/app/src/main/assets/web/</string>
+
+    <string name="scan_hint">将相机对准电脑上的配对二维码</string>
+    <string name="scan_cancel">取消</string>
 </resources>

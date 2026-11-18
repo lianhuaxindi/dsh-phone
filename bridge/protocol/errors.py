@@ -22,6 +22,7 @@ class ErrorCode(IntEnum):
     APPROVAL_TIMEOUT = 3002
     MODEL_ERROR = 3003
     SERVER_BUSY = 4001
+    IMAGE_INVALID = 4002
     INTERNAL_ERROR = 5001
     SDK_PROTOCOL_ERROR = 5002
 
@@ -49,6 +50,7 @@ RETRYABLE: dict[int, bool] = {
     ErrorCode.APPROVAL_TIMEOUT: True,
     ErrorCode.MODEL_ERROR: False,
     ErrorCode.SERVER_BUSY: True,
+    ErrorCode.IMAGE_INVALID: False,
     ErrorCode.INTERNAL_ERROR: True,
     ErrorCode.SDK_PROTOCOL_ERROR: False,
 }

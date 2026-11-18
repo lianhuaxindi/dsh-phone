@@ -212,3 +212,77 @@
 - 实测：首次 `BUILD SUCCESSFUL in 54s`、增量 21s（35 tasks up-to-date）；产物 `app/android/app/build/outputs/apk/debug/app-debug.apk` = 3,867,632 B、SHA256 `72C34DBA629475D421B517FD8976942DAC764A91985111DAC0FDA97E718CA408`、badging `com.dsh.phone` versionCode 10000 / versionName 1.0.0 / minSdk 29 / targetSdk 35、内含 26 个 `assets/web/*`、9 个 dex、49 entries。
 - 文档：`app/android/BUILD-LOCAL.md`（12 章：工具链版本与安装、每 shell 环境变量、可复制构建命令、实测数据、APK 校验、单测三条路径、非 ASCII 路径、已知 warning、CI 参考、故障排查表、改动文件）。
 - 影响：M3 真机验收不再被 CI 阻塞；CI 解锁后仍作为「干净机器可复现 + 回归」使用。
+
+## D-028 真模型模式：`deepseek-flash` + 1M 上下文 + 思考强度（2026-11-18）
+
+- 状态：已定（本轮 v1.1 改造）。
+- 取证（DeepSeek 官方文档，`https://api-docs.deepseek.com/`）：当前推荐模型 id 为 **`deepseek-flash`**（`deepseek-v4-flash` 为其旧名/别名，请求由 **DeepSeek-V4.1-Flash-1017** 承接）；**1M 上下文**、最大输出 **384K**；支持 **Vision**（仅 flash，v4-pro 不支持）；思考模式**默认开启**，`reasoning_effort` 取 `low|high|max`（默认 `high`，别名 minimal/medium/xhigh/ultra 分别归并到 low/high/max）；OpenAI 兼容 Base URL `https://api.deepseek.com`。
+- 决定（`bridge/config.example.toml` 的 `[dsh]` 段，默认即真模型）：
+  ```toml
+  [dsh]
+  enabled = true
+  home = "state/dsh_home"
+  provider = "deepseek-official"
+  model = "deepseek-flash"
+  reasoningEffort = "high"   # low | high | max
+  maxTokens = 384000         # 官方上限 384K；如需更省可用 8192/32768
+  contextWindowTokens = 1000000  # 展示兜底值，运行时 request/context 有值则以运行时为准
+  runtimeExe = ""            # 留空 = 自动解析本机 DSH runtime（D-022）
+  apiKey = ""                # 由用户填写；留空则读 DEEPSEEK_API_KEY / DSH_PHONE_API_KEY
+  baseUrl = "https://api.deepseek.com"
+  ```
+- 理由：用户要求「真模型模式、apiKey 预留、模型 DeepSeek-v4.1-flash、参数按官方文档」；填 `deepseek-flash` 而非旧别名可避免废弃告警；思考强度默认 `high` 与官方默认一致；`maxTokens` 取官方上限（是上限而非固定消耗）。
+- 落地：`bridge/config.py` 的 `DshConfig` 与 `_ALLOWED_KEYS["dsh"]` 增 `reasoningEffort`/`maxTokens`/`contextWindowTokens`；`bridge/dsh_sdk.py` 把 `reasoning_effort`/`max_tokens` 传给 `DeepSeekHarnessConfig`；apiKey 打码仍走 `as_dict()`。
+- 影响：`--self-test` 的 `dsh.config` 检查应显示 provider/model/effort 但 apiKey 只显示「已配置/未配置」；未配置 apiKey 时 `enabled=true` 也能启动，真 prompt 会失败并回 `turn.error{3003}` + 明确提示「请填写 apiKey」。
+
+## D-029 图片消息管线（上传/拍照 → DSH 内容块 → 历史引用）
+
+- 状态：已定（协议 §9 v1.1 已冻结）。
+- 事实：DSH SDK `Session.run()` 接受**内容块数组**；运行时 `zContentBlock` 支持 `{"type":"image","data":<base64>,"mimeType":"image/jpeg|png|gif|webp"}`；DeepSeek Vision 接口接受 base64 data URL / 外链 / Files API 三种，按**文件内容**判定格式，单图 ≤32 MiB、单请求 ≤600 张，但手机端没必要用满。
+- 决定：
+  1. **手机端**取图两条路：系统相机 `MediaStore.ACTION_IMAGE_CAPTURE`（FileProvider 临时文件）+ 相册 `ACTION_GET_CONTENT`（`image/*`）；**在 Native 侧**缩放到长边 ≤1600、重编码 JPEG q≈0.8（`BitmapFactory` + `Bitmap.compress`），避免大图/HEIC 与超限。
+  2. 传输：`chat.send.images[]`（base64，最多 4 张、单张 ≤2 MiB、合计 ≤6 MiB）；服务端按 magic bytes 校验，非法 → `error{code:4002}` 且不启动 turn。
+  3. 服务端落盘 `state/media/<sha256>.<ext>` 并去重，随后把消息里的 base64 剥掉再送 SDK；历史/回放只带 `{mediaId,mimeType,width,height,sizeBytes}`，客户端按需 `media.get`。
+  4. UI：先本地对象 URL 显示缩略图（乐观渲染），失败回滚；历史消息用 `media.get` + IndexedDB 缓存。
+  5. 保留期与 history 一致（7 天），清理 history 时一并清 `media/` 中无引用文件。
+- 理由：绕开 HEIC/超大图/EXIF 旋转差异；base64 只在上行链路出现一次，不会写日志（日志白名单已覆盖 `data` 键需新增脱敏）。
+- 影响：`state/media/` 需 gitignore；`logging_setup.py` 脱敏键增加 `data`/`images`；Bridge 需在 `--self-test` 增加 media 目录可写检查（可选）。
+
+## D-030 扫码配对：Camera2 + ZXing core，本地解码（2026-11-18）
+
+- 状态：已定（本轮修掉「有扫码按钮但扫不了」）。
+- 事实：V1 早期 `scanPairing` 固定返回 `{supported:false,reason:"m3"}`（D-011），Web 只做了按钮占位；用户真机上无法扫码 ⇒ 必须真实现。
+- 决定：Android 端新增扫码页（Activity 或全屏 Dialog），**Camera2 API + `com.google.zxing:core:3.5.3`** 本地解码（约 ~0.5 MB，无 GMS/ML Kit 依赖、无联网、国内可用），`CAMERA` 运行时权限；识别 `QR_CODE` 一种格式即可。
+- `scanPairing` op 语义：打开扫码 UI → 成功回 `scanPairing.result{ok:true, uri, host, port, fp, code, sid, hosts[], name?}`；取消/失败回 `{ok:false, reason:"cancelled"|"permission_denied"|"no_camera"|"decode_failed"}`；同时保留 `scale`/手动输入兜底（粘贴整条 URI 亦可）。
+- 理由：不引入 CameraX/ML Kit 这类重依赖；扫码只需 QR 单格式；本地解码无隐私外发。
+- 影响：`AndroidManifest.xml` 加 `CAMERA` 权限（`uses-feature android.hardware.camera android:required="false"` 以免影响无相机设备安装）；`check_kotlin_static.py` 增相机权限/特性检查项。
+
+## D-031 公共 Wi-Fi / 多网卡直连策略（hosts[] + 可选 bind-all）
+
+- 状态：已定（本轮）。
+- 问题：本机常有多块网卡（WLAN 10.5.19.39、VMware 192.168.148.1/192.168.198.1、Mihomo TUN 198.18.0.1）；手机该连哪个 IP 取决于它和电脑实际走的网段；公共 Wi-Fi 还可能有 AP 隔离。
+- 决定：
+  1. Bridge 生成配对 URI 时填 `hosts[]`：所有**私网** IPv4（10/8、172.16/12、192.168/16），**排除**虚拟网卡（VMware/VirtualBox/Hyper-V/Mihomo/Clash/Tailscale/ZeroTier/WSL/Docker/br-）与 198.18/198.19，WLAN/以太网优先；`host` 仍为首选地址。
+  2. App 连接时按 `host → hosts[]` 逐个试，**每地址 3 秒**超时，首个成功即用并记住（下次优先尝试上次成功的地址）。
+  3. 默认**不**绑 0.0.0.0（D-…安全基线保持）；新增**显式**开关 `[server].bindAll = false` / CLI `--bind-all`：开启时绑 `0.0.0.0` 并在启动日志打 WARNING、配对页提示「已监听所有网卡，请只在可信网络使用」。安全边界不变（仍要求 TLS 指纹 pinning + 配对码 + HMAC 认证）。
+  4. 连接失败时 App 给出可操作诊断：列出尝试过的地址与耗时、提示「手机与电脑是否同一网段」「公共 Wi-Fi 可能开启了 AP 隔离，可尝试用手机热点让电脑连入」、以及手动输入提示。
+- 理由：不改安全默认值，但让「实际能连上」成为默认体验；AP 隔离无法用软件绕过，只能给替代路径（热点）。
+- 影响：`bridge/qr.py`/`server.py` 生成 URI 与 `state/qr.png`；`scripts/bridge_lan.py` 的候选排序逻辑复用；Android `PairUri` 解析 hosts 并实现多地址回退；Web 配对页展示尝试进度。
+
+## D-032 顶部栏展示口径：模型 / 思考强度 / 上下文占用 + UI 贴近 DeepSeek 官方版
+
+- 状态：已定（本轮 UI 改造）。
+- 数据来源（以运行时为准，缺省回退配置）：`session.meta{provider,model,reasoningEffort,contextWindow}`（来自 `request/context`、`model/selection`）；`assistant.done.usage{...usedTokens}`（来自 `assistant/message.usage`）。
+- 展示：
+  - 模型 chip：`deepseek-flash` → 显示「DeepSeek-V4.1-Flash」；`deepseek-v4-pro` → 「DeepSeek-V4-Pro」；未知 model 原样显示。
+  - 思考强度 chip：`low/high/max` → 「思考·低/高/最高」；`disabled`/缺失 → 不显示 chip。
+  - 上下文占用：环形或细条 + `used/1M` 百分比；`contextWindow` 缺失时用 `[dsh].contextWindowTokens`（默认 1,000,000）兜底并标注为估算。
+- UI 风格：浅色/深色双主题、主色 `#4D6BFE`（DeepSeek 蓝）、圆角气泡、底部 composer（附件/相机/麦克风）、会话抽屉、流式打字机本地渲染（D-018）、空态欢迎语；不做像素级复刻（避免商标/版权风险，只取版式与交互习惯）。
+- 理由：用户要求「尽量和 DeepSeek 官方手机端一致，并显示模型、思考强度、上下文占用」；用真实运行时字段避免假数据。
+
+## D-033 版本：协议 v1.1（向后兼容增量）+ App 1.1.0（versionCode 10100）
+
+- 状态：已定。
+- 决定：子协议仍为 `dsphone.v1`（不改名，避免两端握手改动）；本轮新增字段全部可选（`hosts`/`name`/`images`/`session.meta`/`usage`/`media.get|data`/`scanPairing.result`），旧客户端遇到未知字段应忽略，故按 **v1.1 增量**记录在 PROTOCOL §5.1/§8.1/§9 与 §16。
+- App 版本：`versionName=1.1.0`、`versionCode=10100`（`ci/version.json` 与 `app/android` 默认值同步）。
+- 理由：新老 APK 对旧 Bridge 仍能连（只是无图片/用量能力）；避免一次协议大版本升级带来的双端联调成本。

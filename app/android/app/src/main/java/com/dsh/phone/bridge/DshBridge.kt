@@ -54,6 +54,7 @@ class DshBridge(private val webView: WebView) {
                     port = obj.optInt("port", 0),
                     fingerprint = obj.optString("fp", ""),
                     deviceId = obj.optString("deviceId", ""),
+                    hosts = readHosts(obj),
                 )
 
                 "disconnect" -> AppCore.disconnect()
@@ -93,7 +94,11 @@ class DshBridge(private val webView: WebView) {
                 )
 
                 "exportLogs" -> AppCore.exportLogs()
-                "scanPairing" -> emit(scanPairingUnsupported())
+                "scanPairing" -> AppCore.requestScanPairing()
+                "pickImage" -> AppCore.requestPickImage(
+                    obj.optString("source", "").ifBlank { AppCore.SOURCE_GALLERY },
+                )
+
                 else -> emitBridgeError("unsupported op: $op")
             }
         } catch (e: Exception) {
@@ -114,11 +119,22 @@ class DshBridge(private val webView: WebView) {
         }
     }
 
-    private fun scanPairingUnsupported(): String = JsonObj()
-        .put("type", "scanPairing.result")
-        .put("supported", false)
-        .put("reason", "m3")
-        .toJsonText()
+    /**
+     * `connect` may carry the v1.1 `hosts` candidate list from the pairing URI
+     * (D-031). Validation of individual addresses stays in Pairing/WssClient.
+     */
+    private fun readHosts(obj: JSONObject): List<String> {
+        val array = obj.optJSONArray("hosts") ?: return emptyList()
+        val hosts = ArrayList<String>(array.length())
+        for (index in 0 until array.length()) {
+            if (hosts.size >= MAX_HOST_CANDIDATES) break
+            val value = array.optString(index, "").trim()
+            if (value.isNotEmpty() && !hosts.contains(value)) {
+                hosts.add(value)
+            }
+        }
+        return hosts
+    }
 
     private fun emitBridgeError(message: String) {
         emit(
@@ -170,5 +186,6 @@ class DshBridge(private val webView: WebView) {
 
     private companion object {
         const val MAX_PENDING_EVENTS = 200
+        const val MAX_HOST_CANDIDATES = 16
     }
 }

@@ -88,12 +88,15 @@ WS close
 Bridge 启动或请求配对时打印二维码，内容为 URI：
 
 ```
-dsphone://pair?v=1&host=192.168.1.10&port=8765&fp=<64hex>&code=123456&sid=srv-1a2b
+dsphone://pair?v=1&host=192.168.1.10&port=8765&fp=<64hex>&code=123456&sid=srv-1a2b&hosts=192.168.1.10,10.5.19.39&name=KQ-PC
 ```
 
-- `host` 必须是**具体监听地址**（禁止 0.0.0.0；默认部署为 127.0.0.1，局域网需显式开启）。
+- `host`：**首选**具体监听地址（禁止 0.0.0.0；默认部署为 127.0.0.1，局域网需显式开启）。
+- `hosts`（v1.1，可选）：逗号分隔的**候选地址**，与 `host` 同一 `port`，用于本机多网卡 / 公共 Wi-Fi / IP 变化场景；客户端按 `host` → `hosts` 顺序逐个尝试，每地址 **3 秒**连接超时，首个成功者生效，全部失败才报错。
 - `code`：6 位数字，**TTL 120 秒**；同一 `deviceId`/来源失败 **5 次锁定 5 分钟**（关闭码 4410）。
 - `fp`：服务器证书 SHA-256 指纹，客户端必须校验。
+- `name`（v1.1，可选）：电脑显示名，配对页展示用。
+- Bridge 必须同时把同一 URI 渲染成 `state/qr.png`（≥512×512、纠错级别 M）并打印绝对路径，供手机扫描电脑屏幕（终端 ASCII 二维码常因字号/低对比扫不出）。
 - App 也支持手动输入 host/port/fp/code（扫码失败兜底）。
 
 ### 5.2 pair.request（C→S）
@@ -169,7 +172,14 @@ sha256(canonical)   = 4c1b758da310551fca45aeb91ed7cdb302fe09627d50421e0cd0aac595
 
 ```json
 Session = {"sessionId":"s-1","title":"厨房待办","updatedAt":1710000000,"lastPreview":"帮你查一下..."}
-Message = {"messageId":"m-1","sessionId":"s-1","role":"user|assistant|system","text":"...","status":"done|streaming|error","createdAt":1710000000}
+Message = {"messageId":"m-1","sessionId":"s-1","role":"user|assistant|system","text":"...","status":"done|streaming|error","createdAt":1710000000,
+           "images":[{"mediaId":"md-3f2a...","mimeType":"image/jpeg","width":1600,"height":1200,"sizeBytes":234567}]}
+```
+
+- `images`（v1.1，可选）：仅 `user` 消息。历史/回放只带 `mediaId` 元数据，**不含 base64**；客户端需要原图时用 `media.get` 拉取（见 §9）。
+
+```json
+SessionMeta = {"sessionId":"s-1","provider":"deepseek-official","model":"deepseek-flash","reasoningEffort":"high","contextWindow":1000000}
 ```
 
 ### 8.2 消息
@@ -188,12 +198,17 @@ Message = {"messageId":"m-1","sessionId":"s-1","role":"user|assistant|system","t
 ## 9. 对话
 
 ```json
-C→S {"type":"chat.send","seq":10,"clientId":"<uuidv4>","sessionId":"s-1","text":"帮我查待办"}
+C→S {"type":"chat.send","seq":10,"clientId":"<uuidv4>","sessionId":"s-1","text":"这张图里有什么",
+     "images":[{"mimeType":"image/jpeg","data":"<base64>","name":"IMG_0001.jpg","width":1600,"height":1200}]}
 S→C {"type":"chat.ack","seq":20,"replyTo":10,"clientId":"<uuidv4>","messageId":"m-2"}
+S→C {"type":"session.meta","seq":20,"sessionId":"s-1","provider":"deepseek-official","model":"deepseek-flash","reasoningEffort":"high","contextWindow":1000000}
 S→C {"type":"assistant.delta","seq":21,"sessionId":"s-1","messageId":"m-3","text":"好的","index":0}
 S→C {"type":"tool.status","seq":22,"sessionId":"s-1","toolCallId":"t-1","name":"bash","state":"running","title":"执行 ls"}
-S→C {"type":"assistant.done","seq":23,"sessionId":"s-1","messageId":"m-3","finishReason":"completed"}
+S→C {"type":"assistant.done","seq":23,"sessionId":"s-1","messageId":"m-3","finishReason":"completed",
+     "usage":{"inputTokens":1200,"outputTokens":340,"totalTokens":1540,"cacheReadTokens":900,"cacheWriteTokens":0,"reasoningTokens":120,"contextWindow":1000000,"usedTokens":1540}}
 S→C {"type":"turn.error","seq":24,"sessionId":"s-1","code":3003,"message":"model error"}
+C→S {"type":"media.get","seq":11,"mediaId":"md-3f2a..."}
+S→C {"type":"media.data","seq":30,"replyTo":11,"mediaId":"md-3f2a...","mimeType":"image/jpeg","data":"<base64>"}
 ```
 
 规则：
@@ -203,6 +218,10 @@ S→C {"type":"turn.error","seq":24,"sessionId":"s-1","code":3003,"message":"mod
 - **幂等**：服务端按 `clientId` 去重（每会话保留最近 200 个）。重复 `chat.send` 只回 `chat.ack`（不再触发执行）。
 - **并发**：同一会话同时只允许 1 个进行中的 turn；忙 → `error{code:4001,"retryable":true}`，客户端排队或禁用发送按钮。
 - **停止生成**：`C→S {"type":"chat.cancel","seq":n,"sessionId":"s-1"}`。SDK 0.2.2rc2 **没有** cancel/interrupt/stop（唯一手段是杀运行时进程）→ 服务端一律回 `turn.error{code:3003,"message":"cancel unsupported (SDK 0.2.2rc2)"}`，**不得**发 `assistant.done{finishReason:"cancelled"}` 谎报已取消（D-019）。客户端「停止」按钮文案需体现可能无效。
+- **图片消息（v1.1）**：`chat.send.images` 最多 **4 张**，单张解码后 ≤ **2 MiB**，合计 ≤ **6 MiB**；格式只接受 JPEG/PNG/WEBP/GIF，按**文件头 magic bytes** 判定（不信任 `mimeType`/文件名）。非法或超限 → `error{code:4002,"retryable":false}`，turn 不启动。服务端把图片落盘到 `state/media/<sha256>.<ext>`（同 hash 去重），落盘后删除 `chat.send` 里的 base64，SDK 侧改用内容块 `{"type":"image","data":...,"mimeType":...}`；手机端**必须**先缩放到长边 ≤1600 并重编码（JPEG q≈0.8）再上传。
+- **会话元信息（v1.1）**：`session.meta` 在 `session.create.ok` / `session.resume.ok` 之后立即发一次，并在运行时 `model/selection` 或 `request/context` 变化时补发；字段 `model`/`reasoningEffort`/`contextWindow` 用于顶部「模型 / 思考强度 / 上下文占用」展示，缺失的键省略（不造 0）。
+- **用量（v1.1）**：`assistant.done.usage` 来自运行时事件 `assistant/message.data.usage`（`TokenUsage{inputTokens,outputTokens,totalTokens?,cacheReadTokens?,cacheWriteTokens?,reasoningTokens?}`）+ 最近一次 `request/context.contextWindow`；`usedTokens` = `totalTokens ?? inputTokens+outputTokens`。无 usage 时省略该键。客户端上下文占用 = `usedTokens / contextWindow`。
+- **媒体拉取（v1.1）**：`media.get` 只允许已认证连接、且只返回本 Bridge `state/media/` 下的媒体；未知 id → `error{code:3001}`；单次返回 ≤2 MiB。
 
 ## 10. 音频与 ASR
 
@@ -283,6 +302,7 @@ S→C {"type":"question.expired","seq":51,"id":"q-1","cancelled":true}
 | 3002 | 审批超时 | 是 | 提示已默认拒绝 |
 | 3003 | 模型 / DSH 错误 | 视情况 | 展示 `message` + 重试按钮 |
 | 4001 | 服务端忙 / 背压 | 是 | 延迟重试（指数退避） |
+| 4002 | 图片/请求内容非法（张数、体积、格式或编码错误） | 否 | 提示用户重选图片（不要整段重发） |
 | 5001 | 内部错误 | 是 | 展示诊断 ID |
 | 5002 | SDK 协议错误 | 否 | 上报诊断页 |
 
@@ -305,7 +325,8 @@ S→C {"type":"question.expired","seq":51,"id":"q-1","cancelled":true}
 | 项 | 限制 |
 |---|---|
 | 文本消息长度 | ≤ 32,000 字符 |
-| JSON 帧 | ≤ 64 KiB |
+| JSON 帧 | ≤ 64 KiB（**唯一例外**：带 `images` 的 `chat.send` 帧 ≤ 8 MiB，因 base64 膨胀） |
+| 图片 | 每条 ≤ 4 张、单张解码后 ≤ 2 MiB、合计 ≤ 6 MiB；仅 JPEG/PNG/WEBP/GIF（按 magic bytes） |
 | 音频帧 payload | 恰好 640 B（16k/16bit/mono/20ms） |
 | `asr.partial` 频率 | ≤ 5 次/秒 |
 | 服务端事件重放缓冲 | 512 条 / 10 分钟 |
@@ -331,10 +352,26 @@ S→C {"type":"question.expired","seq":51,"id":"q-1","cancelled":true}
    - `app/web/js/protocol.js` 与 `app/android/.../Protocol.kt` 的消息定义
 3. 不兼容变更必须同时升 `v` 与子协议，并在 `docs/DECISIONS.md` 记一条 ADR。
 
----
+## 16. v1.1 增量清单（2026-11-18，向后兼容）
+
+子协议仍为 `dsphone.v1`；下列全部是**可选字段/新消息**，旧实现按 §14 忽略未知字段即可继续工作。
+
+| 位置 | 增量 | 兼容性 |
+|---|---|---|
+| §5.1 配对 URI | `hosts=`（逗号分隔候选地址）、`name=`（电脑显示名）；Bridge 额外生成 `state/qr.png` | 旧扫描器忽略未知查询参数 |
+| §8.1 `Message` | `images[]`（仅 user，含 mediaId/mimeType/width/height/sizeBytes） | 可选 |
+| §8.1 `SessionMeta` | 新结构 `{sessionId,provider,model,reasoningEffort,contextWindow}` | 新消息 |
+| §9 `chat.send` | `images[]`（≤4 张/单张 2 MiB/合计 6 MiB，base64） | 旧 Bridge 会忽略未知字段但会丢图 |
+| §9 `session.meta` | 新 S→C 消息（create/resume 后与 model/selection、request/context 变化时发） | 新消息 |
+| §9 `assistant.done` | `usage{inputTokens,outputTokens,totalTokens,cacheReadTokens,cacheWriteTokens,reasoningTokens,contextWindow,usedTokens}` | 可选 |
+| §9 `media.get` / `media.data` | 新消息对（取历史图片原图） | 新消息 |
+| §12 | 新增错误码 `4002`（图片/请求内容非法） | 新码 |
+| §13 | 图片限制；`chat.send` 带图时帧上限放宽到 8 MiB | 限制表 |
+| JsBridge（ARCHITECTURE §3.2） | `pickImage` op；`scanPairing` 由占位改为真实现 | App 内部契约 |
 
 **变更记录**
 
 | 版本 | 日期 | 内容 |
 |---|---|---|
 | v1.0 | 2026-11-17 | 冻结：传输/信封/握手/配对/认证/会话/对话/音频/审批/错误/限制 |
+| v1.1 | 2026-11-18 | 增量：真模型默认值（D-028）、图片消息管线（D-029）、扫码配对真实现（D-030）、多地址/bindAll（D-031）、会话元信息与用量（D-032 展示口径）、App 1.1.0（D-033） |

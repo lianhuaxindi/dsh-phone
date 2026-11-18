@@ -35,6 +35,7 @@ __all__ = [
     "DshError",
     "DshApproval",
     "DshQuestion",
+    "DshMeta",
     "DshEvent",
     "DshTurn",
     "DshClient",
@@ -72,6 +73,18 @@ class DshDone:
     """turn 正常结束（或取消）。"""
 
     finish_reason: str = "completed"  # completed | cancelled
+    #: v1.1：token 用量（映射到 assistant.done.usage；None 表示省略）。
+    usage: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class DshMeta:
+    """v1.1：会话运行时元信息（映射到 ``session.meta``）。"""
+
+    provider: str | None = None
+    model: str | None = None
+    reasoning_effort: str | None = None
+    context_window: int | None = None
 
 
 @dataclass(frozen=True)
@@ -103,7 +116,9 @@ class DshQuestion:
     deadline: int = 0
 
 
-DshEvent = Union[DshDelta, DshTool, DshDone, DshError, DshApproval, DshQuestion]
+DshEvent = Union[
+    DshDelta, DshTool, DshDone, DshError, DshApproval, DshQuestion, DshMeta
+]
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +179,12 @@ class DshClient(abc.ABC):
     async def list_sessions(self) -> list[DshSession]: ...
 
     @abc.abstractmethod
-    def start_turn(self, session_id: str, text: str) -> DshTurn: ...
+    def start_turn(
+        self,
+        session_id: str,
+        text: str,
+        images: list[dict[str, Any]] | None = None,
+    ) -> DshTurn: ...
 
 
 # ---------------------------------------------------------------------------
@@ -189,12 +209,14 @@ class FakeTurn(DshTurn):
         session_id: str,
         text: str,
         *,
+        images: list[dict[str, Any]] | None = None,
         chunk_delay: float = 0.01,
     ) -> None:
         super().__init__()
         self.client = client
         self.session_id = session_id
         self.text = text
+        self.images = images or []
         self.chunk_delay = chunk_delay
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
         self._task: asyncio.Task[None] | None = None
@@ -238,6 +260,32 @@ class FakeTurn(DshTurn):
     def __aiter__(self) -> "FakeTurn":
         return self
 
+    # -- 元信息 / 用量 -----------------------------------------------------
+
+    def _meta_event(self) -> DshMeta:
+        client = self.client
+        return DshMeta(
+            provider=client.provider or None,
+            model=client.model or None,
+            reasoning_effort=client.reasoning_effort or None,
+            context_window=client.context_window_tokens or None,
+        )
+
+    def _usage(self) -> dict[str, Any]:
+        output_tokens = len(self.text) // 4 + 8
+        input_tokens = 42
+        total_tokens = input_tokens + output_tokens
+        return {
+            "inputTokens": input_tokens,
+            "outputTokens": output_tokens,
+            "totalTokens": total_tokens,
+            "contextWindow": self.client.context_window_tokens,
+            "usedTokens": total_tokens,
+        }
+
+    def _done(self, finish_reason: str) -> None:
+        self._emit(DshDone(finish_reason=finish_reason, usage=self._usage()))
+
     # -- 内部 -------------------------------------------------------------
 
     async def _pause(self, seconds: float) -> bool:
@@ -266,13 +314,14 @@ class FakeTurn(DshTurn):
         except Exception as exc:  # pragma: no cover - 防御
             logger.exception("fake turn crashed: %s", exc)
             self._emit(DshError(message=f"内部错误: {exc}"))
-            self._emit(DshDone(finish_reason="error"))
+            self._done("error")
         finally:
             self._emit(_END) if False else self._queue.put_nowait(_END)
 
     async def _run_inner(self) -> None:
         text = self.text
         lower = text.lower()
+        self._emit(self._meta_event())
         if any(mark in lower for mark in ERROR_MARKERS):
             await self._pause(self.chunk_delay)
             self._emit(DshError(message="模拟模型错误（fake）"))
@@ -289,20 +338,22 @@ class FakeTurn(DshTurn):
             DshTool(tool_call_id=tool_id, name="search", state="running", title="搜索资料")
         )
         if not await self._pause(self.chunk_delay):
-            self._emit(DshDone(finish_reason="cancelled"))
+            self._done("cancelled")
             return
-        reply = f"收到：{text}"
+        if self.images:
+            reply = f"收到 {len(self.images)} 张图片。"
+        else:
+            reply = f"收到：{text}"
+        old_delay = self.chunk_delay
         if slow:
             reply = reply + "。" + "这是一段用于测试取消的较长回复。" * 5
-            chunk_delay, old_delay = 0.05, self.chunk_delay
-            self.chunk_delay = chunk_delay
-        ok = await self._stream_text(reply)
-        self.chunk_delay = old_delay if slow else self.chunk_delay  # type: ignore[has-type]
+            self.chunk_delay = 0.05
+        try:
+            ok = await self._stream_text(reply)
+        finally:
+            self.chunk_delay = old_delay
         self._emit(DshTool(tool_call_id=tool_id, name="search", state="done", title="搜索资料"))
-        if not ok:
-            self._emit(DshDone(finish_reason="cancelled"))
-        else:
-            self._emit(DshDone(finish_reason="completed"))
+        self._done("completed" if ok else "cancelled")
 
     async def _approval_flow(self) -> None:
         request_id = f"appr-{uuid.uuid4().hex[:8]}"
@@ -323,7 +374,7 @@ class FakeTurn(DshTurn):
         )
         outcome = await self._wait_approval(request_id, deadline)
         if self.cancelled:
-            self._emit(DshDone(finish_reason="cancelled"))
+            self._done("cancelled")
             return
         if outcome == "approved":
             await self._stream_text("已批准，操作完成。")
@@ -331,7 +382,7 @@ class FakeTurn(DshTurn):
             await self._stream_text("操作未获批准，已跳过。")
         self._emit(DshTool(tool_call_id=request_id, name="delete_file", state="done",
                             title="删除临时文件"))
-        self._emit(DshDone(finish_reason="completed"))
+        self._done("completed")
 
     async def _wait_approval(self, request_id: str, deadline: int) -> str | None:
         loop = asyncio.get_running_loop()
@@ -374,7 +425,7 @@ class FakeTurn(DshTurn):
         )
         answers = await self._wait_question(request_id, deadline)
         if self.cancelled:
-            self._emit(DshDone(finish_reason="cancelled"))
+            self._done("cancelled")
             return
         if answers:
             await self._stream_text("已收到你的选择。")
@@ -382,7 +433,7 @@ class FakeTurn(DshTurn):
             await self._stream_text("未收到选择，已使用默认值。")
         self._emit(DshTool(tool_call_id=request_id, name="ask_user", state="done",
                             title="等待用户选择"))
-        self._emit(DshDone(finish_reason="completed"))
+        self._done("completed")
 
     async def _wait_question(
         self, request_id: str, deadline: int
@@ -419,10 +470,18 @@ class FakeDsh(DshClient):
         question_deadline_sec: int = 600,
         chunk_delay: float = 0.01,
         clock: Any = None,
+        provider: str = "deepseek-official",
+        model: str = "deepseek-flash",
+        reasoning_effort: str = "high",
+        context_window_tokens: int = 1000000,
     ) -> None:
         self.approval_deadline_sec = approval_deadline_sec
         self.question_deadline_sec = question_deadline_sec
         self.chunk_delay = chunk_delay
+        self.provider = provider
+        self.model = model
+        self.reasoning_effort = reasoning_effort
+        self.context_window_tokens = context_window_tokens
         import time as _time
 
         self._clock = clock or _time.time
@@ -457,8 +516,15 @@ class FakeDsh(DshClient):
     async def get_session(self, session_id: str) -> DshSession | None:
         return self._sessions.get(session_id)
 
-    def start_turn(self, session_id: str, text: str) -> FakeTurn:
-        turn = FakeTurn(self, session_id, text, chunk_delay=self.chunk_delay)
+    def start_turn(
+        self,
+        session_id: str,
+        text: str,
+        images: list[dict[str, Any]] | None = None,
+    ) -> FakeTurn:
+        turn = FakeTurn(
+            self, session_id, text, images=images, chunk_delay=self.chunk_delay
+        )
         self._turns.add(turn)
         turn.start()
         return turn
@@ -482,7 +548,12 @@ def create_dsh_client(
     config = config or DshConfig()
     if not config.enabled:
         logger.info("dsh.fake_mode", extra={"event": "dsh.fake_mode"})
-        return FakeDsh()
+        return FakeDsh(
+            provider=config.provider or "deepseek-official",
+            model=config.model or "deepseek-flash",
+            reasoning_effort=config.reasoning_effort or "high",
+            context_window_tokens=config.context_window_tokens or 1000000,
+        )
 
     # 真实 SDK 适配器（spike 结论落地后新增 bridge/dsh_sdk.py；当前不存在）
     try:

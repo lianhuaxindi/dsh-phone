@@ -14,7 +14,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
-    <!-- M3 扫码配对（ZXing embedded）预留；M2 仅手动输入，不请求运行时权限。 -->
+    <!-- 扫码配对（v1.1，D-030）：Camera2 + ZXing 本地解码，无 GMS、无联网。 -->
     <uses-permission android:name="android.permission.CAMERA" />
 
     <!-- API 29-30 用 startBluetoothSco 需要旧权限；31+ 通信设备 API 不需要 BLUETOOTH_CONNECT。 -->
@@ -47,10 +47,23 @@
             </intent-filter>
         </activity>
 
+        <!-- 扫码配对 UI（v1.1）：全屏 Camera2+ZXing，结果回 MainActivity。 -->
+        <activity
+            android:name=".ScanActivity"
+            android:exported="false"
+            android:theme="@style/Theme.DshPhone" />
+
         <!-- 录音与网络连接由前台服务持有，保证锁屏/切后台 5 分钟内 PTT 可用。 -->
         <service
             android:name=".service.MicService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <!-- 相机/相册取图（D-029）：cacheDir/images 下的临时文件，无 AndroidX 依赖。 -->
+        <provider
+            android:name=".storage.ImageFileProvider"
+            android:authorities="com.dsh.phone.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 </manifest>
