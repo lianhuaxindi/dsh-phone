@@ -414,20 +414,41 @@ def check_scan_pairing(sources: dict[Path, tuple[str, str]]) -> None:
     if not scan:
         fail("ScanActivity.kt: v1.1 QR scanner missing")
         return
+    # 相机/生命周期相关标记留在 Activity 里。
     for token in (
         "CameraManager",
         "ImageReader",
-        "MultiFormatReader",
-        "BarcodeFormat.QR_CODE",
         "checkSelfPermission(Manifest.permission.CAMERA)",
         "requestPermissions(",
         "RESULT_OK",
         "RESULT_CANCELED",
         "REASON_PERMISSION_DENIED",
         "REASON_NO_CAMERA",
+        # D-036：相机取不到画面时的相册兜底
+        "ACTION_GET_CONTENT",
     ):
         if token not in scan:
             fail(f"ScanActivity.kt: QR scanner incomplete: missing `{token}`")
+    # ZXing 解码核心自 D-036 起抽到 scan/ 包（纯 JVM，可单测），标记改为跨文件校验。
+    decoder = read_text(SRC_ROOT / "java" / "com" / "dsh" / "phone" / "scan" / "QrDecoder.kt")
+    luma = read_text(SRC_ROOT / "java" / "com" / "dsh" / "phone" / "scan" / "YuvLuma.kt")
+    if not decoder:
+        fail("scan/QrDecoder.kt: QR decode core missing (D-036)")
+        return
+    if not luma:
+        fail("scan/YuvLuma.kt: YUV_420_888 luminance converter missing (D-036)")
+        return
+    scanner = "\n".join((scan, decoder, luma))
+    for token in (
+        "MultiFormatReader",
+        "BarcodeFormat.QR_CODE",
+        "HybridBinarizer",
+        "GlobalHistogramBinarizer",
+        "rowStride",
+        "QrDecoder.decodeGray",
+    ):
+        if token not in scanner:
+            fail(f"scan/: QR scanner incomplete: missing `{token}`")
 
 
 # --------------------------------------------------------------------------- N

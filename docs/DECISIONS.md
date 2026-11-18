@@ -307,3 +307,18 @@
 - 验证：`scripts\bridge_lan.py --json` → `{"best":"10.15.187.127",…}`；`scripts\start_bridge.ps1` 端到端 → banner `监听 10.15.187.127:8765`、配对码 959766、`二维码图片 …\bridge\state\qr.png`、`server.started`，`-Stop` 正常退出并释放端口；新增 `bridge/tests/test_netinfo.py`（8 例：英文/中文标签、折行网关、掩码、`is_bindable`、候选过滤、`pairing_hosts` 不混入不可 bind 地址），全量 `pytest bridge\tests` → **154 passed**。
 - 教训：从 `ipconfig` 文本里抓 IP 不能「整块正则扫」，必须认标签；凡是「拿来自动填配置」的地址，落盘前先做一次 bind 探测（代价 1ms，省一次启动失败）。
 - 附带修复（同一提交）：一键脚本原来每次启动都从示例**重写** `config.local.toml`，用户填的 `[dsh] apiKey` 会被冲掉 → 现在若文件已存在且含 `host` 行，只在原文件上替换 `host`/`port`/`pairCodeTtlSec`，其余内容（apiKey、model 等）原样保留（DryRun 实测：`host 1.2.3.4 → 10.15.187.127`，`apiKey` 保留）。另：`scripts/*.ps1` 必须保持 **UTF-8 BOM**，编辑后若丢 BOM，PowerShell 5.1 会按 GBK 解码中文并在语法层报 `The string is missing the terminator`（本次已踩，已恢复 BOM）。
+
+## D-036 扫码认不出二维码：解码核心抽纯 JVM + 多路兜底 + 相册/诊断（2026-11-18）
+
+- 状态：已修（Lead 热修），APK 已重建。
+- 现象：v1.1 APK 的扫码页**能起摄像头预览，但对着电脑屏幕上的二维码始终不出结果**（用户 m02266），不像权限/相机问题。
+- **先证明码本身没问题**：用仓库里 zxing core 3.5.3 的 `MultiFormatReader` 在 JVM 里直接解 `bridge/state/qr.png`（732×732）→ 正确解出 176 字符 `dsphone://pair?...`；把同一张图缩到 600/500/400/320/256/200 px 仍可解，160 px 才失败（`QrCheck.java`，一次性验证脚本，未入库）⇒ 图片码可扫，问题在手机端取流/解码链路，**或者用户扫的是终端里的字符画二维码**（半块字符渲染的 QR 不是标准码图，手机几乎扫不出——Bridge 早就为此额外生成 `qr.png`，见 PROTOCOL §5.1）。
+- 改动（`app/android/`）：
+  1. 解码核心抽成纯 JVM 的 `scan/QrDecoder.kt`（不依赖 Android，可单测）：整帧 `HybridBinarizer` → 整帧 `GlobalHistogramBinarizer` → 整帧**反色** → **中心 62% 裁剪**后重试；每次新建 `MultiFormatReader`（避免 `decodeWithState` 的状态残留）。
+  2. 新增 `scan/YuvLuma.kt`：显式处理 Camera2 `YUV_420_888` Y 平面的 `rowStride` 填充与 `pixelStride`，把「斜图/花屏」这类取流 bug 变成可单测问题。
+  3. `ScanActivity`：取流尺寸从「≤1280 边」提高到「≤1920×1080 的最大 YUV 尺寸」；每 3 帧解一次；触摸 = 点按对焦（`CONTROL_AF_REGIONS`），新增 `2×` 数字变焦、`补光`（TORCH）、**`相册选码`**（`ACTION_GET_CONTENT` → 位图灰度 → 同一解码核心）；画面顶部实时显示「已看 N 帧 · 解码 M 次 · 未识别 K 次」，3 秒收不到帧时明确提示相机被占用 —— 下次现场可直接区分「没取到画面」和「取到但认不出」。
+  4. 文案改中文（`res/values/strings.xml`），并写明「扫 `bridge\state\qr.png`，不要扫终端字符画」。
+  5. `app/android/tools/check_kotlin_static.py` 的扫码断言改为**跨文件**（相机标记查 `ScanActivity.kt`，ZXing 标记查 `scan/` 包），并新增 `ACTION_GET_CONTENT` 要求，防止重构后失去兜底路径。
+- 验证：新增 `QrDecoderTest`（6 例：亮底、深色底反色、大画布中央小码、`rowStride` 填充 Y 平面、噪点必须 null、中心裁剪尺寸）+ `YuvLumaTest`（4 例：等宽、行填充、`pixelStride`、非法参数）→ 直连 JUnitCore **81 tests OK**（原 71 + 10）；4 个 Android 静态脚本全 exit 0；`gradle assembleDebug` BUILD SUCCESSFUL 26s，APK **4,590,029 B**、sha256 `856645B2D692C4ADD6C61A170F5D3EC84483754437F5E7120AB23E4D87AE93C3`、versionName 1.1.0 / versionCode 10100。
+- 未验证：真机 Camera2 取流/对焦/变焦实际效果（本机无 adb），需用户装新包复测；若新包顶部显示「已看 N 帧」在涨仍认不出，再用「相册选码」隔离是「取流/对焦」还是「解码」问题。
+- 教训：① 纯逻辑（字节/位图/协议）不要写在 Activity 里，拆出来才能在无真机环境下用 JVM 单测证明；② 二维码失败必须能区分「取不到帧」与「解不出码」，否则排障全靠猜；③ 排障先验「输入本身对不对」（本次用 ZXing 自己解 qr.png，5 分钟排除一半可能）。

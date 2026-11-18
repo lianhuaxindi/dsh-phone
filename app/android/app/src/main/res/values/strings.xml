@@ -14,6 +14,17 @@
     <string name="fallback_body">Run scripts/sync_web.ps1 (or scripts/sync_web.sh) before building so that app/web is packaged inside the APK.</string>
     <string name="fallback_hint">Expected at app/android/app/src/main/assets/web/</string>
 
-    <string name="scan_hint">Point the camera at the pairing QR code on your computer</string>
-    <string name="scan_cancel">Cancel</string>
+    <string name="scan_hint">把手机对准电脑屏幕上的二维码（距离 20–40cm；不要扫终端里的字符画二维码，扫 bridge\\state\\qr.png 那张图）</string>
+    <string name="scan_cancel">取消</string>
+    <string name="scan_gallery">相册选码</string>
+    <string name="scan_zoom">2×</string>
+    <string name="scan_zoom_on">1×</string>
+    <string name="scan_torch">补光</string>
+    <string name="scan_focusing">已对焦，正在识别…</string>
+    <string name="scan_no_frames">未取到摄像头画面：可能被其它应用占用，请退出重进，或用「相册选码」</string>
+    <string name="scan_status_running">已看 %1$d 帧 · 解码 %2$d 次 · 未识别 %3$d 次（对准二维码，试试 2× 或补光）</string>
+    <string name="scan_status_first_miss">拍到画面但没认出二维码：靠近一点或点「2×」，也可以用「相册选码」</string>
+    <string name="scan_gallery_unavailable">打不开相册</string>
+    <string name="scan_gallery_decoding">正在识别图片…</string>
+    <string name="scan_gallery_no_qr">这张图里没找到二维码</string>
 </resources>

@@ -7,10 +7,10 @@
 ## 1. 当前状态（一句话版）
 
 **电脑端 Bridge 已完整可跑**（WSS + 配对认证 + 协议 v1.1 + 真 ASR + 真模型默认配置 + DSH SDK 接线，146 个测试绿、`--self-test` 6 PASS / 1 SKIP）；
-**手机端代码完整**（Kotlin 壳 + WebView UI），**debug APK 已在本机构建成功**（`com.dsh.phone` **1.1.0 (10100)**，4,578,710 B，见 §3.2），但**还没有在真机上跑过**；
+**手机端代码完整**（Kotlin 壳 + WebView UI），**debug APK 已在本机构建成功**（`com.dsh.phone` **1.1.0 (10100)**，4,590,029 B，见 §3.2），但**还没有在真机上跑过**；
 **CI 流水线已写好**，但 **GitHub Actions 被账号 billing lock 阻塞**（D-026），首次 CI 至今未跑。
 
-**v1.1 新增（2026-11-18，D-028…D-035）**：① 手机端**真扫码配对**（Camera2 + ZXing，`ScanActivity`）；② **公共 Wi-Fi / 多地址**：配对 URI 带 `hosts=`，手机按 host→hosts 逐个 3 秒尝试并记忆上次成功地址；Bridge 同时输出 **`bridge/state/qr.png`**（手机扫图可用）；③ `[dsh]` **默认真模型**：provider=deepseek-official、model=deepseek-flash（DeepSeek-V4.1-Flash-1017，1M 上下文 / 最大输出 384K）、reasoningEffort=high、maxTokens=384000，**apiKey 留空由你填**（回退 `DEEPSEEK_API_KEY` / `DSH_PHONE_API_KEY`）；④ 手机端**上传照片/拍照**（`pickImage`，长边≤1600 / JPEG q80 / ≤2MiB×4、合计≤6MiB），图片随 `chat.send.images` 发给模型；⑤ UI 改成 **DeepSeek 官方手机端风格**（#4D6BFE、圆角气泡、会话抽屉、全屏聊天），顶部显示 **模型 / 思考强度 / 上下文占用**（`session.meta` + `assistant.done.usage`）。
+**v1.1 新增（2026-11-18，D-028…D-036）**：⓪ **扫码加固（D-036）**：解码核心抽成纯 JVM 的 `scan/QrDecoder`+`scan/YuvLuma`，整帧/反色/中心裁剪三路兜底，取流尺寸提到 ≤1920×1080，新增点按对焦、`2×` 变焦、`补光`、**相册选码**兜底与画面上「帧数/解码次数」诊断；① 手机端**真扫码配对**（Camera2 + ZXing，`ScanActivity`）；② **公共 Wi-Fi / 多地址**：配对 URI 带 `hosts=`，手机按 host→hosts 逐个 3 秒尝试并记忆上次成功地址；Bridge 同时输出 **`bridge/state/qr.png`**（手机扫图可用）；③ `[dsh]` **默认真模型**：provider=deepseek-official、model=deepseek-flash（DeepSeek-V4.1-Flash-1017，1M 上下文 / 最大输出 384K）、reasoningEffort=high、maxTokens=384000，**apiKey 留空由你填**（回退 `DEEPSEEK_API_KEY` / `DSH_PHONE_API_KEY`）；④ 手机端**上传照片/拍照**（`pickImage`，长边≤1600 / JPEG q80 / ≤2MiB×4、合计≤6MiB），图片随 `chat.send.images` 发给模型；⑤ UI 改成 **DeepSeek 官方手机端风格**（#4D6BFE、圆角气泡、会话抽屉、全屏聊天），顶部显示 **模型 / 思考强度 / 上下文占用**（`session.meta` + `assistant.done.usage`）。
 
 | 里程碑 | 内容 | 状态 | 证据 |
 |---|---|---|---|
@@ -127,7 +127,7 @@ python -m http.server 8123
 ### 3.2 出 APK（本机已装好工具链，一条命令出包）
 
 **APK 已经在本机构建成功**（2026-11-18）：`app/android/app/build/outputs/apk/debug/app-debug.apk`
-→ 4,578,710 B（sha256 `A45C164E55331ACF03697D7106DEC6C60DD37361AEE0E4C263DB14E726704601`），`package com.dsh.phone`、`versionCode 10100` / `versionName 1.1.0`、minSdk 29 / targetSdk 35、内含 26 个 `assets/web/*` 资源。
+→ 4,590,029 B（sha256 `856645B2D692C4ADD6C61A170F5D3EC84483754437F5E7120AB23E4D87AE93C3`，D-036 扫码加固后重建），`package com.dsh.phone`、`versionCode 10100` / `versionName 1.1.0`、minSdk 29 / targetSdk 35、内含 26 个 `assets/web/*` 资源。
 
 本机工具链（无需系统安装、全部在工作区 `.tools/` 下，已 gitignore）：JDK 17 + Android cmdline-tools（`platform-tools` / `platforms;android-35` / `build-tools;35.0.0`）+ Gradle 8.9。首次安装与可复制命令见 **`app/android/BUILD-LOCAL.md`**（12 章，含环境变量、单测替代跑法、非 ASCII 路径开关、故障排查表）。
 
@@ -172,7 +172,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\sync_web.ps1    
 | **端到端（模拟手机）** | `scripts\e2e_phone_sim.py --asr fake` / `--asr sherpa` | **21 checks / 22 checks PASS，exit 0**（见 §2.4） |
 | ASR 基准 | `scripts\bench_asr.py --backend sherpa` | NFR PASS |
 | Web 单测 | `cd app\web; node --test --test-isolation=none "tests/*.test.js"` | **144 tests 全绿** |
-| **Android 构建（本机）** | `.tools` 工具链 + `gradle assembleDebug`（见 `app/android/BUILD-LOCAL.md`） | **BUILD SUCCESSFUL**，`app-debug.apk` 4,578,710 B，SHA256 `A45C164E…E726704601`，badging `com.dsh.phone` 1.1.0 / 10100 |
+| **Android 构建（本机）** | `.tools` 工具链 + `gradle assembleDebug`（见 `app/android/BUILD-LOCAL.md`） | **BUILD SUCCESSFUL**，`app-debug.apk` 4,590,029 B，SHA256 `856645B2…D87AE93C3`，badging `com.dsh.phone` 1.1.0 / 10100 |
 | **Android 单测** | 直连 JUnit4（`BUILD-LOCAL.md` §7.2）／ASCII 副本 `testDebugUnitTest`（§7.3） | **71 tests / 0 failures**（10 个测试类） |
 | Android 静态 | `app\android\tools\{verify_protocol,check_contract,check_kotlin_static,check_gradle_config}.py` | 101 checks / 17+17 ops / 25 files / 67 checks 全 OK（0 warning） |
 | CI 配置 | `python ci/check_workflow.py --strict` + pyyaml 解析 | exit 0 / 4 jobs |
@@ -199,6 +199,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\sync_web.ps1    
 | 工程路径含中文（`D:\code\apps\手机端`） | AGP 直接拒绝：「Your project path contains non-ASCII characters」；`aapt2` 日志里路径变乱码 | `app/android/gradle.properties` 已设 `android.overridePathCheck=true`（CI 英文路径不受影响） |
 | 干净机器缺 Build Tools 34.0.0 | AGP 8.7.x 默认要 34.0.0，而 SDK 只装 35.0.0 → `Failed to find Build Tools revision 34.0.0` | `app/android/app/build.gradle.kts` 已显式钉 `buildToolsVersion = "35.0.0"`（D-027） |
 | 双击启动脚本后「Bridge 以退出码 1 结束」 | 日志末尾 `无法监听 10.15.0.1:8765: could not bind`，`config.local.toml` 的 `host` 被写成默认网关 | 已修（D-035）：现在只认 `IPv4 地址` 标签行且必须能 bind；若仍不对，用 `scripts\start_bridge.ps1 -HostAddress <手机同网段的 WLAN IPv4>` 手动指定，或先跑 `python scripts\bridge_lan.py --json` 看候选 |
+| 扫码页能起摄像头但**认不出**二维码 | 对着电脑屏幕上的码一直不返回；或画面顶部「已看 N 帧 · 解码 M 次 · 未识别 K 次」在涨但码不变绿 | 已加固（D-036）：**别扫终端里的字符画二维码**，用图片查看器打开 `bridge\state\qr.png` 再扫；新 APK 支持点按对焦、`2×`、`补光`，还可用「相册选码」（把二维码截图/存到手机相册后选图解码）。若 `已看 0 帧` → 相机被其它应用占用，退出重进 |
 
 ## 6. 建议的下一步（按优先级）
 
@@ -213,7 +214,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\sync_web.ps1    
 ```
 docs/PROTOCOL.md            协议 v1 + v1.1 增量（冻结；子协议 dsphone.v1）
 docs/ARCHITECTURE.md        三端架构、JsBridge 契约（17 ops）、配置样例
-docs/DECISIONS.md           D-001…D-035 全部决策与理由
+docs/DECISIONS.md           D-001…D-036 全部决策与理由
 docs/HANDOVER.md            本文件（状态/上手/已知坑/下一步）
 docs/TESTPLAN.md            69 条用例 + PRD 39 个 FR 映射
 docs/SECURITY.md            STRIDE + 12 项安全设计 + 7 项安全测试

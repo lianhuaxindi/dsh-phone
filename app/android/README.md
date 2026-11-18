@@ -106,7 +106,7 @@ explicit MIME types: `.js` → `text/javascript`, `.json` → `application/json`
 `.css` → `text/css`. If the assets are missing the app shows a localized
 fallback page instead of a blank screen.
 
-### v1.1 additions (D-029 / D-030 / D-031 / D-033)
+### v1.1 additions (D-029 / D-030 / D-031 / D-033 / D-036)
 
 - **QR scanning (`scanPairing`).** `ScanActivity` uses Camera2 + ZXing core
   (`BarcodeFormat.QR_CODE`, `MultiFormatReader`) to decode locally — no Play
@@ -115,6 +115,16 @@ fallback page instead of a blank screen.
   camera-less devices still install and fall back to manual pairing. Success →
   `{"type":"scanPairing.result","ok":true,"uri":...,"host":...,"port":...,"fp":...,"code":...,"sid":...,"hosts":[...],"name":...}`;
   failure → `{"ok":false,"reason":"cancelled|permission_denied|no_camera|decode_failed"}`.
+  - **D-036 hardening:** the decode core lives in the pure-JVM
+    `scan/QrDecoder.kt` (whole frame HybridBinarizer → GlobalHistogramBinarizer
+    → inverted → center 62% crop) with `scan/YuvLuma.kt` handling
+    `rowStride`/`pixelStride`; `ScanActivity` captures up to 1920×1080, decodes
+    every 3rd frame, and adds tap-to-focus, a `2×` digital-zoom button, a torch
+    button and a **"pick from gallery"** fallback (`ACTION_GET_CONTENT` → bitmap
+    luminance → same decoder). A live status line shows
+    `frames / decode tries / misses`, so "no frames" (camera busy) is
+    distinguishable from "frames but no QR". Scan `bridge/state/qr.png`, not the
+    terminal's block-character QR art.
 - **Image pick (`pickImage`).** `{"op":"pickImage","source":"camera"|"gallery"}`.
   Gallery = `ACTION_GET_CONTENT` (`image/*`, `CATEGORY_OPENABLE`); camera =
   `ACTION_IMAGE_CAPTURE` with `EXTRA_OUTPUT` pointing at a private
